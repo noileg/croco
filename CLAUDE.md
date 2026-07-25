@@ -1,0 +1,104 @@
+# クロコ
+
+Notion + Gemini + Claude Code による個人用ワークフロー自動化パイプライン。
+スマホで思いついたことを、寝かせずに実装まで持っていくのが目的。
+
+## どのファイルを読むべきか
+
+読む前にここで当たりをつけること。**仕様書は長いので全文を読まない。**
+
+| 知りたいこと | 読む場所 |
+|---|---|
+| 使い方・セットアップ手順 | `クロコ本体/README.md` |
+| 未解決の課題・これからやること | `クロコ本体/足りないもの.md` |
+| なぜその設計にしたのかの経緯 | `クロコ本体/クロコ_仕様書_統合版.md`（**必要な章だけ**） |
+| 実装の詳細 | 各モジュールのdocstring（冒頭に設計意図を書いてある） |
+
+仕様書の章立て：2章=スコープ、2.5章=ワークフローの確定事項（本体）、
+3章=第二段階の将来構想（今は対象外）、4章=未決定事項。
+
+## 動作の流れ
+
+```
+スマホ(Notion AIチャット) → Notion「未処理置き場」の子ページ
+  ↓ PC起動時に run_croco.py
+① 捕捉  Gemini が話題ごとに分割 → Inbox DB → 「処理済み置き場」へ移動
+② 実装  Inbox DB から1件選び claude -p で無人起動 → 進捗をNotionに書き戻す
+```
+
+## 設計上、絶対に守ること
+
+- **Geminiに要約させない。** 役割は「話題の切れ目で分割」＋「逐語転記」だけ。
+  要約で失われた情報は後段で復元できない。何を作るか決まっていない段階で
+  非可逆圧縮を挟まないのが設計の根幹。
+  ※ 本人が会話で「要約」と言う場合もこの方針を指している。方針変更ではない。
+- **失敗したら何もしない。** ステータスを変えず、ページも移動させない。
+  放置すれば次回のPC起動時に自然に再試行される。専用のクラッシュ復旧処理は持たない。
+- **「未処理置き場」に子ページとして存在すること自体が未処理の印。**
+  捕捉層に別途ステータスフラグは持たせない。
+- **「処理中」は異常状態ではない。** 複数の起動セッションをまたいで進行中という意味。
+  次回起動時は新規の「未処理」より「処理中」を優先して再開する。
+- **外部パッケージを増やさない。** 標準ライブラリのみ。PC起動時に走る以上、
+  pipや仮想環境の状態で起動が失敗する余地を作らない。
+
+## 環境（調べ直さないこと）
+
+- Windows 11、メモリ8GB、PC1台のみ。常時起動サーバーなし。
+- Python 3.14 / Node v24。外部パッケージは入れていない。
+- **NortonのSSL/TLSスキャンが全HTTPS通信を傍受している。**
+  Nortonが動的生成するCA証明書の BasicConstraints が critical 指定されておらず、
+  Python 3.13以降で既定有効の `VERIFY_X509_STRICT` がこれを弾く。
+  → `croco/httpjson.py` が、このエラーの時だけ STRICT を外して再試行する形で対処済み。
+    証明書チェーンの信頼検証・ホスト名照合・有効期限の確認は引き続き有効。
+  → **同種のSSLエラーを見ても再調査不要。** 原因はこれ。
+- 実行時は `PYTHONUTF8=1` を付ける（付けないと日本語出力が化ける）。
+
+## API仕様（実APIで確認済み。ドキュメントと食い違う箇所があるので調べ直さないこと）
+
+### Notion（`Notion-Version: 2026-03-11`）
+- DB配下のページ作成・クエリの親は `database_id` ではなく **`data_source_id`**
+  （2025-09-03でdatabaseとdata sourceが分離された）。
+  DBのIDからは `GET /v1/databases/{id}` の `data_sources[0].id` で解決できる。
+- ページ移動は `POST /v1/pages/{id}/move`、body は `{"parent":{"type":"page_id","page_id":...}}`。
+- DB作成時のスキーマは `initial_data_source.properties` に入れる。
+- rich_text は1要素2000文字まで。超える場合は分割して送る。
+
+### Gemini（`gemini-3.6-flash`）
+- エンドポイント：`POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
+  認証はヘッダ `x-goog-api-key`。
+- 構造化出力：`generationConfig.responseFormat.text.{mimeType, schema}`。
+  **`mimeType` は自由文字列ではなく enum。`"application/json"` は400になる。
+  正しい値は `"APPLICATION_JSON"`**（公式ドキュメントの例が実APIと食い違っている）。
+- thinking：`generationConfig.thinkingConfig.thinkingLevel`（`minimal`/`low`/`medium`/`high`）。
+  旧2.5系の `thinkingBudget` とは併用不可。
+- LLMは現在時刻を知らないので、相対表現（「来週の火曜」）の解決用に
+  捕捉日時をスクリプト側からプロンプトに注入している。
+
+## よく使うコマンド
+
+```
+python test_offline.py              # APIキー不要の回帰テスト。変更したらまずこれ
+python setup_notion.py --check      # Notion疎通確認
+python run_croco.py --dry-run       # 書き込まず、何をするかだけ表示
+python run_croco.py --capture       # 捕捉フェーズのみ
+python run_croco.py --dispatch      # 実装フェーズのみ
+```
+
+## 無人実行の安全策
+
+`croco_settings.json`（`claude -p --settings` で渡す）の deny リストが最後の砦。
+deny はどのパーミッションモードでも効く。細かい判断は `--permission-mode auto` に任せる。
+
+**このファイルを編集したら必ず検証すること。**
+`-p`（非対話）モードでは検証に失敗した設定ファイルが*無言で無視される*ため、
+書き間違えると deny リストごと効かなくなる。手順は README 参照。
+
+## 進め方
+
+本人は対話しながら考えをまとめるタイプ。まとめて詳細仕様を先出しするのではなく、
+**1トピックずつ確定させていく**。細部の判断を任されることもあるが、
+黙って決めずに提案の形で出して確認を取ること。
+
+未決定事項を推測で埋めない。分からないことは `足りないもの.md` に積む。
+
+git のコミットは明示的に頼まれたときだけ行う。

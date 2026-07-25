@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push --mirror*)",
+      "Bash(git push --delete*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -fdx*)",
+      "Bash(git filter-branch*)",
+      "Bash(git update-ref -d*)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~*)",
+      "Bash(rm -fr /*)",
+      "Bash(rmdir /s*)",
+      "Bash(del /s*)",
+      "Bash(format *)",
+      "Read(**/.croco/**)",
+      "Edit(**/.croco/**)",
+      "Read(**/.env)",
+      "Edit(**/.env)",
+      "Edit(**/クロコ本体/croco/**)",
+      "Edit(**/クロコ本体/run_croco.py)",
+      "Edit(**/クロコ本体/croco_cli.py)",
+      "Edit(**/クロコ本体/croco_settings.json)",
+      "Bash(npm publish*)",
+      "Bash(twine upload*)",
+      "Bash(gh release create*)",
+      "Bash(gh gist create*)",
+      "Bash(git remote set-url*)",
+      "Bash(git remote add*)",
+      "Bash(icacls *)",
+      "Bash(takeown *)",
+      "Bash(reg add *)",
+      "Bash(reg delete *)",
+      "Bash(schtasks *)",
+      "Bash(shutdown *)"
+    ],
+    "allow": [
+      "Bash(python *croco_cli.py*)"
+    ]
+  }
+}
