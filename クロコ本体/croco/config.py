@@ -175,6 +175,14 @@ class Config:
         return CROCO_HOME / "logs"
 
     @property
+    def pick_timeout(self) -> float:
+        """着手アイテムを選ぶ猶予（秒）。0以下で「常に自動選択」。
+
+        PC起動時に無人で走ることが前提なので、待ち続けない。
+        """
+        return float(self._get("CROCO_PICK_TIMEOUT", "15") or "15")
+
+    @property
     def claude_command(self) -> str:
         return self._get("CROCO_CLAUDE_COMMAND", "claude") or "claude"
 

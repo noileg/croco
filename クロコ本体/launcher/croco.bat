@@ -16,12 +16,14 @@ cd /d "%~dp0.."
 python run_croco.py %*
 set EXITCODE=%ERRORLEVEL%
 
+echo.
 if not "%EXITCODE%"=="0" (
+    echo croco exited with code %EXITCODE%. Log: "%~dp0..\logs"
     echo.
-    echo croco exited with code %EXITCODE%. See the log:
-    echo   "%~dp0..\logs"
-    echo.
-    pause
 )
+
+rem Always keep the window open so the summary above stays readable.
+rem The run is already finished at this point; closing the window is safe.
+pause
 
 exit /b %EXITCODE%

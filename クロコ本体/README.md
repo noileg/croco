@@ -148,9 +148,12 @@ cd tmpcheck && claude doctor
 
 ```
 クロコ本体/
+  クロコ_仕様書_統合版.md  設計と、そう決めた経緯（主文書）
+  README.md             本書。使い方
   run_croco.py          エントリポイント（起動時に走る本体）
   croco_cli.py          クロコ自身が進捗を書き戻すためのCLI
   setup_notion.py       Notion側の実体を作る初期セットアップ
+  test_offline.py       APIキー不要の回帰テスト
   croco_settings.json   無人実行時のパーミッション設定
   .env.example          設定ファイルの雛形
   croco/
@@ -162,9 +165,15 @@ cd tmpcheck && claude doctor
     inbox.py            Inbox DB のスキーマと読み書き
     capture.py          捕捉フェーズ
     dispatch.py         実装フェーズ
+    report.py           終了時のまとめ表示
     log.py              実行ログ
   launcher/
-    croco.bat           起動用ランチャ
+    croco.bat           起動用ランチャ（ASCIIのみで書くこと）
     install_startup.ps1 スタートアップへの登録・解除
+  資料/                 本人が用意した原典。編集しない
+  記録/                 決着済みの記録。普段は読まなくてよい
   logs/                 実行ログ（自動生成）
 ```
+
+読むときの当たりのつけ方：**使い方は本書、設計の理由は仕様書、
+すでに片付いた問題は `記録/` **。仕様書を毎回通読しないこと。

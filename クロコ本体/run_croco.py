@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-from croco import capture, dispatch, httpjson, log
+from croco import capture, dispatch, httpjson, log, report
 from croco.config import Config, ConfigError, load_env
 from croco.lock import AlreadyRunning, SingleInstance
 
@@ -67,6 +67,10 @@ def main(argv: list[str]) -> int:
     except AlreadyRunning as exc:
         log.warn(f"{exc} 今回は何もせず終了します。")
         return 0
+
+    # 「要確認」はNotionを見に行かないと気づけないので、最後に必ず画面へ出す。
+    if not config.dry_run:
+        report.show(config)
 
     log.log("クロコを終了します。")
     return 0

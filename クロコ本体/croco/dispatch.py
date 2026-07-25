@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 from .config import CROCO_HOME, Config
@@ -98,7 +100,7 @@ def run(config: Config) -> bool:
         return False
 
     targets.sort(key=inbox.sort_key)
-    item = targets[0]
+    item = _choose(targets, config)
     log.log(f"着手します: [{item.status}] {item.title}")
 
     # 再試行の上限（仕様書2.5章-12）。無限ループの防止。
@@ -173,6 +175,59 @@ def _build_prompt(config: Config, item: inbox.InboxItem, body: str) -> str:
         projects_dir=config.projects_dir,
         cli_path=CROCO_HOME / "croco_cli.py",
     )
+
+
+def _choose(targets: list[inbox.InboxItem], config: Config) -> inbox.InboxItem:
+    """着手するアイテムを決める。
+
+    候補が複数あるとき、本人がその場にいれば選べるようにする。
+    ただしPC起動時に自動で走ることが前提なので、**待ち続けてはいけない**。
+    制限時間を過ぎたら先頭（＝処理中を優先した並び順の先頭）で自動的に進める。
+    画面が無い状況（リダイレクト等）では、そもそも尋ねない。
+    """
+    if len(targets) == 1 or config.pick_timeout <= 0:
+        return targets[0]
+    if not (sys.stdin and sys.stdin.isatty()):
+        return targets[0]
+
+    log.log(f"着手できるアイテムが {len(targets)} 件あります:")
+    for index, item in enumerate(targets, 1):
+        mark = "※再開" if item.status == inbox.STATUS_DOING else "　　　"
+        log.log(f"  {index:2}) {mark} {item.title}")
+    log.log(
+        f"番号を入れてEnter（{config.pick_timeout}秒で 1) を自動選択）: ",
+    )
+
+    answer: list[str] = []
+
+    def _read() -> None:
+        try:
+            answer.append(sys.stdin.readline())
+        except Exception:
+            pass
+
+    # 入力待ちのスレッドはデーモンにしておく。制限時間を過ぎたら放置して先へ進み、
+    # プロセス終了時にまとめて片付けさせる（stdin待ちは中断できないため）。
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    reader.join(timeout=config.pick_timeout)
+
+    if not answer:
+        log.log("→ 時間切れ。1) で進みます。")
+        return targets[0]
+
+    text = answer[0].strip()
+    if not text:
+        return targets[0]
+    try:
+        index = int(text)
+    except ValueError:
+        log.warn(f"番号として読めません（{text!r}）。1) で進みます。")
+        return targets[0]
+    if not 1 <= index <= len(targets):
+        log.warn(f"範囲外です（{index}）。1) で進みます。")
+        return targets[0]
+    return targets[index - 1]
 
 
 def _render_event(line: str) -> list[str]:
