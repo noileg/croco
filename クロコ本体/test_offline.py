@@ -514,6 +514,91 @@ try:
 finally:
     _notify.winsound = _saved
 
+# --- クロコ自身が鳴らす分 ---------------------------------------------------
+# 対話モードのクロコは作業を終えてもウィンドウが開いたままで、本人が /exit する
+# まで run_croco.py は動かない。「1件片付いた」を知らせられるのはここだけなので、
+# 実際に croco_cli を通して音が出るところまで確かめる。
+import contextlib, io  # noqa: E402
+import croco_cli  # noqa: E402
+
+
+class _Recorder:
+    def __init__(self):
+        self.notes = []
+
+    def Beep(self, frequency, duration):
+        self.notes.append((frequency, duration))
+
+
+class _FakeNotion:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def get_page(self, page_id):
+        return {"properties": {}}
+
+    def update_page(self, page_id, properties):
+        pass
+
+
+def cli_run(command):
+    """croco_cli をNotion抜きで動かして、鳴った音を返す。"""
+    recorder = _Recorder()
+    saved = (_notify.winsound, croco_cli.Config, croco_cli.nt.Notion)
+    _notify.winsound = recorder
+    croco_cli.Config = lambda: Config({"NOTION_TOKEN": "t"})
+    croco_cli.nt.Notion = _FakeNotion
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            croco_cli.main([command, "pid", "メッセージ"])
+    finally:
+        _notify.winsound, croco_cli.Config, croco_cli.nt.Notion = saved
+    return tuple(recorder.notes)
+
+
+check("done で終了の音が鳴る", cli_run("done"), _notify.FINISHED)
+check("review で入力待ちの音が鳴る", cli_run("review"), _notify.WAITING)
+# 区切りごとに鳴らすと狼少年になるので、log と resume は黙る
+check("log では鳴らさない", cli_run("log"), ())
+check("resume では鳴らさない", cli_run("resume"), ())
+# 鳴らす対象は、クロコがプロンプトで実行を指示されているコマンドであること
+check("鳴らすコマンドはプロンプトに載っている",
+      all(f'" {c} {{page_id}}' in _dispatch.PROMPT_TEMPLATE for c in croco_cli.SOUNDS),
+      True)
+
+# --- 無人実行の設定ファイル -------------------------------------------------
+# **このファイルが最後の砦。** `-p` では検証に落ちた設定ファイルが無言で無視されるので、
+# 壊れていることに気づけるのはここだけ。
+import json as _json  # noqa: E402
+
+_settings = _json.loads(
+    (_dispatch.CROCO_HOME / "croco_settings.json").read_text(encoding="utf-8")
+)
+_deny = _settings["permissions"]["deny"]
+
+# Write(...) の deny は**ファイル権限の判定に使われない**（Claude Code が --debug で警告を出す）。
+# Edit(...) が全ての書き込み系ツールを覆うので、守りたいパスは必ず Edit で書くこと。
+check("Write(...)のdenyを書かない（効かない）",
+      [r for r in _deny if r.startswith("Write(")], [])
+for _path in ("**/クロコ本体/**", "**/下書き/**", "**/.croco/**", "**/.env",
+              "**/.claude/**", "**/.ssh/**"):
+    check(f"deny: Edit({_path})", f"Edit({_path})" in _deny, True)
+check("deny: 公開はクロコの仕事ではない",
+      all(r in _deny for r in ("Bash(git push*)", "Bash(gh *)")), True)
+
+# クロコが本人を待って止まったときに鳴らすフック。
+# ここの音を notify.py と手で二重管理しているので、ずれたら落ちるようにしておく。
+_hook = _settings["hooks"]["Notification"][0]["hooks"][0]
+_hook_code = _hook["args"][-1]
+check("フックは入力待ちの音を鳴らす",
+      all(f"winsound.Beep({f},{d})" in _hook_code for f, d in _notify.WAITING), True)
+check("フックが余計な音を鳴らさない", _hook_code.count("winsound.Beep"), len(_notify.WAITING))
+# シェルを介さない exec 形式にしてある（引用符の解釈でパスや括弧が壊れるのを避けるため）
+check("フックはargs実行形式", ("args" in _hook, _hook["command"]), (True, "python"))
+# 通知の入切は1箇所であること。クロコ側だけ鳴り続けるのを防ぐ
+check("フックもCROCO_NOTIFYを見る", "CROCO_NOTIFY" in _hook_code, True)
+check("フックはクロコを待たせない", _hook.get("async"), True)
+
 consult_prompt = _consult.PROMPT_TEMPLATE.format(
     page_id="pid", title="自己推薦書", hold_reason=inbox.HOLD_DOCUMENT,
     body="B", progress="P", reason_note=_consult.REASON_NOTES[inbox.HOLD_DOCUMENT],

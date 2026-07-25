@@ -640,12 +640,17 @@ def launch_claude(config: Config, prompt: str) -> int:
         str(projects_dir),
     ]
 
+    # 通知の入切をクロコ側にも伝える。croco_settings.json の Notification フックが
+    # これを見る。伝えないと `CROCO_NOTIFY=0` にしてもクロコだけ鳴り続ける
+    # ＝消し方が2箇所に分かれてしまう。
+    child_env = os.environ | {"CROCO_NOTIFY": "1" if config.notify else "0"}
+
     if config.interactive:
-        return _run_interactive(command, projects_dir)
-    return _run_headless(command, projects_dir)
+        return _run_interactive(command, projects_dir, child_env)
+    return _run_headless(command, projects_dir, child_env)
 
 
-def _run_interactive(command: list[str], projects_dir: Path) -> int:
+def _run_interactive(command: list[str], projects_dir: Path, env: dict[str, str]) -> int:
     """画面をクロコに明け渡して対話で動かす。
 
     出力を横取りするとTUIが壊れるので、標準入出力はそのまま引き継ぐ。
@@ -656,14 +661,14 @@ def _run_interactive(command: list[str], projects_dir: Path) -> int:
     log.log("画面をクロコに渡します。必要なら途中で口を挟んでください。")
     log.log("")
 
-    process = subprocess.run(command, cwd=str(projects_dir))
+    process = subprocess.run(command, cwd=str(projects_dir), env=env)
 
     log.log("")
     log.log(f"クロコのセッションが終了しました (exit={process.returncode})")
     return process.returncode
 
 
-def _run_headless(command: list[str], projects_dir: Path) -> int:
+def _run_headless(command: list[str], projects_dir: Path, env: dict[str, str]) -> int:
     """非対話で動かす（`CROCO_INTERACTIVE=0` のとき）。
 
     既定の text 形式は完了までバッファされ、実行中に画面へ何も出ないため、
@@ -678,6 +683,7 @@ def _run_headless(command: list[str], projects_dir: Path) -> int:
     process = subprocess.Popen(
         command,
         cwd=str(projects_dir),
+        env=env,
         text=True,
         encoding="utf-8",
         errors="replace",

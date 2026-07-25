@@ -16,8 +16,18 @@ from __future__ import annotations
 
 import sys
 
-from croco import inbox, notion as nt
+from croco import inbox, notify, notion as nt
 from croco.config import Config, ConfigError
+
+# 節目で鳴らす音。ここで鳴らすのは run_croco.py 側では間に合わないため。
+# 対話モードのクロコは作業を終えてもウィンドウが開いたままで、本人が `/exit`
+# するまで run_croco.py は subprocess.run() で止まったまま先に進めない。
+# **「この件が片付いた」瞬間はこのコマンドでしか観測できない。**
+# `log` では鳴らさない。区切りごとに鳴らすと狼少年になる。
+SOUNDS = {
+    "done": notify.finished,      # 片付いた。画面を見に来ていい
+    "review": notify.waiting,     # 聞きたいことがある。本人待ち
+}
 
 
 def _append_log(client: nt.Notion, page_id: str, message: str) -> str:
@@ -73,6 +83,10 @@ def main(argv: list[str]) -> int:
 
     client.update_page(page_id, properties)
     print(f"記録しました ({command}): {message}")
+    # 書き込みが通ってから鳴らす。失敗したのに終わった音がすると信用できなくなる。
+    sound = SOUNDS.get(command)
+    if sound is not None:
+        sound(config)
     return 0
 
 
