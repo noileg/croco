@@ -183,6 +183,21 @@ class Config:
         return float(self._get("CROCO_PICK_TIMEOUT", "60") or "60")
 
     @property
+    def interactive(self) -> bool:
+        """対話モードでクロコを起動するか（既定：する）。
+
+        非対話（`claude -p`）だと、途中で軌道修正できないのが最大の弱点になる。
+        変な方向に進み始めても、終わるまで口を挟めない。
+        対話で起動しておけば、横で見ていて必要なときだけ介入できる。
+        本人が離れていても、パーミッションは自動承認なので勝手に進む。
+        """
+        return (self._get("CROCO_INTERACTIVE", "1") or "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+
+    @property
     def claude_command(self) -> str:
         return self._get("CROCO_CLAUDE_COMMAND", "claude") or "claude"
 

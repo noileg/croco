@@ -25,8 +25,12 @@ from . import notion as nt
 SETTINGS_PATH = CROCO_HOME / "croco_settings.json"
 
 PROMPT_TEMPLATE = """\
-あなたは「クロコ」として、本人が不在のまま自動で起動されました。
+あなたは「クロコ」として、Notionに溜まったアイデアを実装するために自動で起動されました。
 以下のアイデアの実装を、可能なところまで自分で進めてください。
+
+本人はこの画面を見ているかもしれませんし、離れているかもしれません。
+**返事を待たずに自分で進めてください。** ただし途中で本人から方針の修正や
+追加の指示が入ることがあります。その場合はそちらを優先してください。
 
 ## 対象アイテム
 - Notionページ ID: {page_id}
@@ -333,12 +337,17 @@ def _resolve_claude(config: Config) -> str | None:
 
 
 def _launch_claude(config: Config, prompt: str) -> int:
-    """クロコを非対話モードで起動する。
+    """クロコを起動する。
 
-    - `-p`      : 非対話（承認プロンプトを出さない）
+    共通のオプション:
     - `--permission-mode auto` : 日常操作は自動承認し、危険操作は内蔵判定でブロック
     - `--settings`             : 上に重ねる deny リスト（仕様書2.5章-9）
     - `--add-dir`              : 作業対象ディレクトリを明示
+
+    既定は**対話モード**。`-p`（非対話）だと、変な方向に進み始めても
+    終わるまで口を挟めないのが最大の弱点になるため。
+    対話で起動しておけば、横で見ていて必要なときだけ軌道修正できる。
+    離れていてもパーミッションは自動承認なので勝手に進む。
     """
     projects_dir: Path = config.projects_dir
     projects_dir.mkdir(parents=True, exist_ok=True)
@@ -353,7 +362,6 @@ def _launch_claude(config: Config, prompt: str) -> int:
 
     command = [
         executable,
-        "-p",
         prompt,
         "--permission-mode",
         "auto",
@@ -361,20 +369,43 @@ def _launch_claude(config: Config, prompt: str) -> int:
         str(SETTINGS_PATH),
         "--add-dir",
         str(projects_dir),
-        # 既定の text 形式は完了までバッファされるため、実行中は画面に何も出ない。
-        # 無人実行とはいえ本人が横目で様子を見る前提なので、
-        # 逐次イベントが流れる stream-json を使って進行を可視化する。
-        "--output-format",
-        "stream-json",
-        "--verbose",
     ]
 
-    log.log(f"クロコを起動します（作業ディレクトリ: {projects_dir}）")
+    if config.interactive:
+        return _run_interactive(command, projects_dir)
+    return _run_headless(command, projects_dir)
+
+
+def _run_interactive(command: list[str], projects_dir: Path) -> int:
+    """画面をクロコに明け渡して対話で動かす。
+
+    出力を横取りするとTUIが壊れるので、標準入出力はそのまま引き継ぐ。
+    そのぶんログファイルにはクロコの発言が残らないが、
+    セッション自体はClaude Code側に残るので `claude --resume` で追える。
+    """
+    log.log(f"クロコを対話モードで起動します（作業ディレクトリ: {projects_dir}）")
+    log.log("画面をクロコに渡します。必要なら途中で口を挟んでください。")
+    log.log("")
+
+    process = subprocess.run(command, cwd=str(projects_dir))
+
+    log.log("")
+    log.log(f"クロコのセッションが終了しました (exit={process.returncode})")
+    return process.returncode
+
+
+def _run_headless(command: list[str], projects_dir: Path) -> int:
+    """非対話で動かす（`CROCO_INTERACTIVE=0` のとき）。
+
+    既定の text 形式は完了までバッファされ、実行中に画面へ何も出ないため、
+    逐次イベントが流れる stream-json を使って進行を可視化する。
+    """
+    command = command[:1] + ["-p"] + command[1:]
+    command += ["--output-format", "stream-json", "--verbose"]
+
+    log.log(f"クロコを非対話モードで起動します（作業ディレクトリ: {projects_dir}）")
     log.log("--- ここからクロコの出力 ---")
 
-    # 出力を貯め込まずに1行ずつ流す。
-    # 実装中は本人が動画を見ながら横目で進捗を眺める想定なので、
-    # 終わるまで何も表示されないと様子が分からず、止め時も判断できない。
     process = subprocess.Popen(
         command,
         cwd=str(projects_dir),

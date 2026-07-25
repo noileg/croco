@@ -11,6 +11,7 @@
     python run_croco.py --capture    # 捕捉のみ
     python run_croco.py --dispatch   # 実装のみ
     python run_croco.py --dry-run    # 書き込みを行わず、何をするかだけ表示
+    python run_croco.py --headless   # クロコを対話ではなく非対話で走らせる
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ def main(argv: list[str]) -> int:
     env = load_env()
     if "--dry-run" in argv:
         env["CROCO_DRY_RUN"] = "1"
+    if "--headless" in argv:
+        env["CROCO_INTERACTIVE"] = "0"
     config = Config(env)
 
     log_path = log.setup(config.log_dir)
