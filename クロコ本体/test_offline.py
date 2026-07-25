@@ -302,6 +302,37 @@ check(
     ["[完了] success / 7ターン / $0.1234", "できました"],
 )
 
+# --- 使用トークンの集計 --------------------------------------------------------
+from croco import usage as _usage  # noqa: E402
+
+u = _usage.Usage(input_tokens=10, output_tokens=20, cache_write_tokens=30, cache_read_tokens=900, messages=2)
+check("usage: freshにキャッシュ読みを含めない", u.fresh, 60)
+check("usage: totalには含める", u.total, 960)
+check("usage: 加算", (u + u).fresh, 120)
+check("usage: 表示に桁の丸めが入る", "60" in u.format(), True)
+check("compact: 千", _usage.compact(1500), "1.5k")
+check("compact: 百万", _usage.compact(2_500_000), "2.5M")
+check("compact: そのまま", _usage.compact(999), "999")
+
+with tempfile.TemporaryDirectory() as tmp:
+    jsonl = Path(tmp) / "s.jsonl"
+    jsonl.write_text(
+        json.dumps({"cwd": "C:/work", "message": {"id": "a", "usage": {"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}}}) + "\n"
+        # 同じidの重複は数えない
+        + json.dumps({"message": {"id": "a", "usage": {"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}}}) + "\n"
+        + json.dumps({"message": {"id": "b", "usage": {"input_tokens": 10, "output_tokens": 20, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}) + "\n"
+        + "壊れた行\n"
+        + json.dumps({"type": "user", "message": {"content": "usageなし"}}) + "\n",
+        encoding="utf-8",
+    )
+    parsed = _usage.read(jsonl)
+    check("usage: 重複を除いて集計", parsed.messages, 2)
+    check("usage: 合計", (parsed.input_tokens, parsed.output_tokens), (11, 22))
+    check("usage: 壊れた行で落ちない", parsed.fresh, 36)
+    check("usage: 記録からcwdを読む", _usage._transcript_cwd(jsonl), "C:/work")
+
+check("usage: 記録が無ければNone", _usage.measure(Path(r"C:\存在しない"), since=0), None)
+
 # --- 結果 ----------------------------------------------------------------
 if failures:
     print(f"FAILED ({len(failures)})")

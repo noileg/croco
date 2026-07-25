@@ -24,6 +24,9 @@ P_STARTED_AT = "処理開始日時"
 P_FINISHED_AT = "処理日時"
 P_RESULT = "実行結果"
 P_ATTEMPTS = "試行回数"
+# そのアイテムに費やしたトークン（セッションをまたいで積み上げる）。
+# 「どれくらい使いそうか」を過去の実績から見積もるための材料でもある。
+P_TOKENS = "トークン"
 
 # --- 選択肢 -----------------------------------------------------------
 
@@ -76,6 +79,7 @@ SCHEMA: dict[str, Any] = {
     P_FINISHED_AT: {"date": {}},
     P_RESULT: {"rich_text": {}},
     P_ATTEMPTS: {"number": {"format": "number"}},
+    P_TOKENS: {"number": {"format": "number"}},
 }
 
 
@@ -175,6 +179,8 @@ class InboxItem:
         self.result_log = nt.plain_text_of(props.get(P_RESULT))
         attempts = props.get(P_ATTEMPTS) or {}
         self.attempts = int(attempts.get("number") or 0)
+        tokens = props.get(P_TOKENS) or {}
+        self.tokens = int(tokens.get("number") or 0)
         self.url: str = page.get("url", "")
 
     def __repr__(self) -> str:

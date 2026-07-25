@@ -15,10 +15,11 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .config import CROCO_HOME, Config
-from . import inbox, log
+from . import inbox, log, usage
 from . import notion as nt
 
 # クロコに渡す設定ファイル。--settings で明示的に指定する。
@@ -104,7 +105,7 @@ def run(config: Config) -> bool:
         return False
 
     targets.sort(key=inbox.sort_key)
-    item = _choose(targets, config)
+    item = _choose(targets, config, _estimate(items))
     log.log(f"着手します: [{item.status}] {item.title}")
 
     # 再試行の上限（仕様書2.5章-12）。無限ループの防止。
@@ -138,7 +139,10 @@ def run(config: Config) -> bool:
     _mark_started(client, item)
 
     prompt = _build_prompt(config, item, body)
+    started_at = time.time()
     exit_code = _launch_claude(config, prompt)
+
+    _record_usage(client, config, item, since=started_at)
 
     if exit_code != 0:
         log.error(
@@ -146,6 +150,34 @@ def run(config: Config) -> bool:
             " ステータスは「処理中」のまま残すので、次回起動時に再開されます。"
         )
     return True
+
+
+def _record_usage(
+    client: nt.Notion, config: Config, item: inbox.InboxItem, *, since: float
+) -> None:
+    """今回のセッションで使ったトークンを画面に出し、Notionに積み上げる。
+
+    対話モードでは出力を横取りできないため、Claude Codeが残すセッション記録から読む。
+    失敗しても実装自体は終わっているので、警告だけ出して先へ進む。
+    """
+    try:
+        used = usage.measure(config.projects_dir, since=since - 60)
+    except Exception as exc:
+        log.warn(f"使用トークンの取得に失敗しました: {exc}")
+        return
+    if used is None or used.messages == 0:
+        log.warn("使用トークンの記録が見つかりませんでした。")
+        return
+
+    log.log(f"今回の使用: {used.format()}")
+    accumulated = item.tokens + used.fresh
+    if item.tokens:
+        log.log(f"このアイテムの累計: {usage.compact(accumulated)} トークン")
+
+    try:
+        client.update_page(item.id, {inbox.P_TOKENS: {"number": accumulated}})
+    except Exception as exc:
+        log.warn(f"使用トークンのNotionへの記録に失敗しました: {exc}")
 
 
 def _appended(existing: str, message: str) -> str:
@@ -181,7 +213,25 @@ def _build_prompt(config: Config, item: inbox.InboxItem, body: str) -> str:
     )
 
 
-def _choose(targets: list[inbox.InboxItem], config: Config) -> inbox.InboxItem:
+def _estimate(items: list[inbox.InboxItem]) -> str:
+    """過去の実績から「1件あたりどれくらい使いそうか」を出す。
+
+    予測というより実績の平均。件数が少ないうちは当てにならないので、
+    何件を根拠にしているかも一緒に出して判断材料にしてもらう。
+    """
+    spent = [item.tokens for item in items if item.tokens > 0]
+    if not spent:
+        return ""
+    average = sum(spent) // len(spent)
+    return (
+        f"過去{len(spent)}件の平均は1件あたり {usage.compact(average)} トークン"
+        f"（最小 {usage.compact(min(spent))} / 最大 {usage.compact(max(spent))}）"
+    )
+
+
+def _choose(
+    targets: list[inbox.InboxItem], config: Config, estimate: str = ""
+) -> inbox.InboxItem:
     """着手するアイテムを決める。
 
     候補が複数あるとき、本人がその場にいれば選べるようにする。
@@ -190,6 +240,8 @@ def _choose(targets: list[inbox.InboxItem], config: Config) -> inbox.InboxItem:
     画面が無い状況（リダイレクト等）では、そもそも尋ねない。
     """
     if len(targets) == 1 or config.pick_timeout <= 0:
+        if estimate:
+            log.log(f"見込み: {estimate}")
         return targets[0]
     if not (sys.stdin and sys.stdin.isatty()):
         return targets[0]
@@ -197,7 +249,10 @@ def _choose(targets: list[inbox.InboxItem], config: Config) -> inbox.InboxItem:
     log.log(f"着手できるアイテムが {len(targets)} 件あります:")
     for index, item in enumerate(targets, 1):
         mark = "※再開" if item.status == inbox.STATUS_DOING else "　　　"
-        log.log(f"  {index:2}) {mark} {item.title}")
+        spent = f"（これまで {usage.compact(item.tokens)}）" if item.tokens else ""
+        log.log(f"  {index:2}) {mark} {item.title}{spent}")
+    if estimate:
+        log.log(f"  見込み: {estimate}")
     log.log(
         f"番号を入れてEnter（{config.pick_timeout}秒で 1) を自動選択）: ",
     )

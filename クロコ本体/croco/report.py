@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .config import Config
-from . import inbox, log
+from . import inbox, log, usage
 from . import notion as nt
 
 
@@ -57,6 +57,29 @@ def show(config: Config) -> None:
         log.log(f"■ 途中のものが {len(doing)} 件あります（次回の起動で再開されます）")
         for item in doing:
             log.log(f"  ・{item.title}")
+
+    spent = [item.tokens for item in items if item.tokens > 0]
+    if spent:
+        average = sum(spent) // len(spent)
+        log.log("")
+        log.log("■ トークンの実績")
+        log.log(f"  これまでの合計    {usage.compact(sum(spent))}（{len(spent)}件分）")
+        log.log(f"  1件あたりの平均   {usage.compact(average)}")
+        log.log(
+            f"  最小 / 最大       {usage.compact(min(spent))} / {usage.compact(max(spent))}"
+        )
+        remaining = [
+            item
+            for item in items
+            if item.status in (inbox.STATUS_TODO, inbox.STATUS_DOING)
+            and item.kind not in inbox.NON_IMPLEMENTABLE_KINDS
+        ]
+        if remaining:
+            log.log(
+                f"  残り{len(remaining)}件を同じペースで進めると"
+                f" 約{usage.compact(average * len(remaining))}"
+            )
+        log.log("  ※ プランの残量そのものは取得できない。セッション内の /usage で見ること")
 
     log.log("=" * 60)
 
