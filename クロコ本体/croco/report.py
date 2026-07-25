@@ -13,9 +13,19 @@ from .config import Config
 from . import inbox, log, usage
 from . import notion as nt
 
+# 保留理由が空のもの。Notionに保存される値ではなく、表示上の受け皿。
+UNRECORDED = "（理由の記録なし）"
+UNRECORDED_ACTION = "中身を見て判断（保留理由を記録する前に溜まったもの）"
 
-def show(config: Config) -> None:
-    """Inbox DBの現状をまとめて出す。失敗しても本処理は既に終わっているので黙って諦める。"""
+
+def show(
+    config: Config, *, run_items: int = 0, run_tokens: int = 0
+) -> list[inbox.InboxItem] | None:
+    """Inbox DBの現状をまとめて出し、読み取った全アイテムを返す。
+
+    返り値は、この直後の相談フェーズが同じ内容を取り直さずに済むようにするため。
+    失敗しても本処理は既に終わっているので黙って諦める。
+    """
     try:
         client = nt.Notion(config.notion_token, config.notion_version)
         data_source_id = config.inbox_data_source_id or client.resolve_data_source_id(
@@ -24,7 +34,7 @@ def show(config: Config) -> None:
         items = [inbox.InboxItem(page) for page in client.query_data_source(data_source_id)]
     except Exception as exc:
         log.warn(f"まとめの取得に失敗しました（処理自体は完了しています）: {exc}")
-        return
+        return None
 
     counts = Counter(item.status for item in items)
     log.log("")
@@ -45,11 +55,7 @@ def show(config: Config) -> None:
     if review:
         log.log("")
         log.log(f"■ 確認してほしいものが {len(review)} 件あります")
-        for item in review:
-            log.log(f"  ・{item.title}")
-            reason = _last_log_entry(item.result_log)
-            if reason:
-                log.log(f"      {reason}")
+        _show_review(review)
 
     doing = [item for item in items if item.status == inbox.STATUS_DOING]
     if doing:
@@ -59,10 +65,13 @@ def show(config: Config) -> None:
             log.log(f"  ・{item.title}")
 
     spent = [item.tokens for item in items if item.tokens > 0]
-    if spent:
-        average = sum(spent) // len(spent)
+    if run_items or spent:
         log.log("")
         log.log("■ トークンの実績")
+    if run_items:
+        log.log(f"  今回の起動        {usage.compact(run_tokens)}（{run_items}件分）")
+    if spent:
+        average = sum(spent) // len(spent)
         log.log(f"  これまでの合計    {usage.compact(sum(spent))}（{len(spent)}件分）")
         log.log(f"  1件あたりの平均   {usage.compact(average)}")
         log.log(
@@ -79,9 +88,43 @@ def show(config: Config) -> None:
                 f"  残り{len(remaining)}件を同じペースで進めると"
                 f" 約{usage.compact(average * len(remaining))}"
             )
+    if run_items or spent:
         log.log("  ※ プランの残量そのものは取得できない。セッション内の /usage で見ること")
 
     log.log("=" * 60)
+    return items
+
+
+def _show_review(review: list[inbox.InboxItem]) -> None:
+    """「要確認」を保留理由ごとに束ねて出す。
+
+    1件ずつ並べると、見るたびに「これは何で止まってるんだっけ」を
+    1件ずつ思い出すことになる。理由が同じものは対処も同じなので、
+    束ねて「で、何をすればいいのか」を1行付ける方が読む側は安い。
+    """
+    grouped: dict[str, list[inbox.InboxItem]] = {}
+    for item in review:
+        # 理由が空のものを既知の理由に混ぜない。保留理由を記録する前に溜まったものや、
+        # Notion上で手で「要確認」にしたものがここに来る。
+        # 分からないものに嘘のラベルを貼ると、束ねる意味がなくなる。
+        grouped.setdefault(item.hold_reason or UNRECORDED, []).append(item)
+
+    # 既知の理由を決めた順で出し、知らない理由は最後に回す。
+    order = [r for r in inbox.HOLD_ACTIONS if r in grouped]
+    order += [r for r in grouped if r not in inbox.HOLD_ACTIONS]
+
+    for reason in order:
+        group = grouped[reason]
+        action = inbox.HOLD_ACTIONS.get(reason) or (
+            UNRECORDED_ACTION if reason == UNRECORDED else ""
+        )
+        head = f"  【{reason}】{len(group)}件"
+        log.log(f"{head} … {action}" if action else head)
+        for item in group:
+            log.log(f"    ・{item.title}")
+            note = _last_log_entry(item.result_log)
+            if note:
+                log.log(f"        {note}")
 
 
 def _last_log_entry(result_log: str) -> str:

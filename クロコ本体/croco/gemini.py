@@ -76,20 +76,30 @@ RESPONSE_SCHEMA = {
                             "単一の日時の場合や期間でない場合は空文字列。"
                         ),
                     },
-                    "needs_human": {
-                        "type": "boolean",
+                    "human_reason": {
+                        "type": "string",
+                        "enum": [
+                            "なし",
+                            "本人名義の文書",
+                            "現実世界の行動",
+                            "クロコ自身の改修",
+                            "本人の判断",
+                        ],
                         "description": (
-                            "本人自身が対応する必要があり、AIに任せてはいけない内容ならtrue。"
-                            "具体的には次のいずれかに当たる場合："
-                            "(1) 本人名義で提出する文書の作成"
+                            "本人自身が対応する必要があり、AIに任せてはいけない内容なら"
+                            "その理由を選ぶ。任せてよいなら「なし」。"
+                            "「本人名義の文書」＝本人名義で提出する文書の作成"
                             "（自己推薦書、志望理由書、活動経過報告書、出願書類、"
                             "大学のレポート、エントリーシート等。"
                             "AIが書いたことが問題になり得るもの）。"
-                            "(2) 現実世界の行動が必要なもの"
-                            "（書類の取り寄せ、郵送、窓口手続き、予約、支払い等）。"
-                            "(3) 本人の価値判断・意思決定そのものが中身になるもの。"
-                            "判断に迷う場合はtrueにすること"
-                            "（falseにすると自動で着手されるため、誤りの代償が大きい）。"
+                            "「現実世界の行動」＝書類の取り寄せ、郵送、窓口手続き、"
+                            "予約、支払いなど、AIが実行できない行動が必要なもの。"
+                            "「クロコ自身の改修」＝このワークフロー基盤"
+                            "（クロコ／Notion連携／捕捉・実装パイプライン自体）の"
+                            "仕様変更・修正・機能追加の依頼。"
+                            "「本人の判断」＝本人の価値判断・意思決定そのものが中身になるもの。"
+                            "判断に迷う場合は「なし」以外を選ぶこと"
+                            "（「なし」にすると自動で着手されるため、誤りの代償が大きい）。"
                         ),
                     },
                 },
@@ -99,7 +109,7 @@ RESPONSE_SCHEMA = {
                     "kind",
                     "scheduled_date",
                     "scheduled_end",
-                    "needs_human",
+                    "human_reason",
                 ],
             },
         }
@@ -113,6 +123,13 @@ VALID_KINDS = frozenset(
     RESPONSE_SCHEMA["properties"]["items"]["items"]["properties"]["kind"]["enum"]
 )
 DEFAULT_KIND = "アイデア"
+
+VALID_HUMAN_REASONS = frozenset(
+    RESPONSE_SCHEMA["properties"]["items"]["items"]["properties"]["human_reason"]["enum"]
+)
+# 値が欠けていた・知らない値だった場合の倒し方。
+# 「なし」に倒すと自動で着手されてしまうので、必ず要確認になる側へ倒す。
+DEFAULT_HUMAN_REASON = "本人の判断"
 
 SYSTEM_INSTRUCTION = """\
 あなたは、音声やチャットで書き留められた個人のブレスト生ログを、
@@ -227,7 +244,11 @@ def _parse_items(response: dict) -> list[dict]:
                 "scheduled_date": (item.get("scheduled_date") or "").strip(),
                 "scheduled_end": (item.get("scheduled_end") or "").strip(),
                 # 値が欠けていた場合は安全側（本人対応が必要）に倒す。
-                "needs_human": bool(item.get("needs_human", True)),
+                "human_reason": (
+                    item.get("human_reason")
+                    if item.get("human_reason") in VALID_HUMAN_REASONS
+                    else DEFAULT_HUMAN_REASON
+                ),
             }
         )
     return valid

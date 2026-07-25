@@ -53,6 +53,8 @@ except ConfigError as exc:
 check("既定モデル", cfg.gemini_model, "gemini-3.6-flash")
 check("既定thinking", cfg.gemini_thinking_level, "minimal")
 check("既定リトライ上限", cfg.max_retries, 3)
+check("既定の連続処理上限", cfg.max_items, 3)
+check("既定のトークン上限は無制限", cfg.token_budget, 0)
 check("既定Notionバージョン", cfg.notion_version, "2026-03-11")
 check("projects_dir 既定", cfg.projects_dir.name, "クロコ管轄プロジェクト")
 
@@ -177,37 +179,59 @@ bad_end = inbox.build_properties(
 check("非ISOの終了は捨てるが開始は残す", ("end" in bad_end, bad_end["start"]), (False, "2026-08-06"))
 
 # --- 本人対応が必要なものは着手キューに入れない -------------------------------
-human = inbox.build_properties(
-    {"title": "自己推薦書作成", "body": "x", "kind": "アイデア",
-     "scheduled_date": "", "needs_human": True},
-    spoken_at=None,
-)
-check("本人対応: ステータスが要確認", human[inbox.P_STATUS]["select"]["name"], "要確認")
-sent_text = "".join(c["text"]["content"] for c in human[inbox.P_RESULT]["rich_text"])
-check("本人対応: 理由が実行結果に残る", "要確認" in sent_text, True)
+for reason in ("本人名義の文書", "現実世界の行動", "クロコ自身の改修", "本人の判断"):
+    human = inbox.build_properties(
+        {"title": "x", "body": "x", "kind": "アイデア",
+         "scheduled_date": "", "human_reason": reason},
+        spoken_at=None,
+    )
+    check(f"本人対応({reason}): 要確認", human[inbox.P_STATUS]["select"]["name"], "要確認")
+    check(f"本人対応({reason}): 保留理由が入る",
+          human[inbox.P_HOLD_REASON]["select"]["name"], reason)
+    sent_text = "".join(c["text"]["content"] for c in human[inbox.P_RESULT]["rich_text"])
+    check(f"本人対応({reason}): 理由が実行結果に残る", reason in sent_text, True)
 
 auto = inbox.build_properties(
     {"title": "ロガー実装", "body": "x", "kind": "アイデア",
-     "scheduled_date": "", "needs_human": False},
+     "scheduled_date": "", "human_reason": "なし"},
     spoken_at=None,
 )
 check("通常: ステータスが未処理", auto[inbox.P_STATUS]["select"]["name"], "未処理")
 check("通常: 実行結果は空のまま", inbox.P_RESULT in auto, False)
+check("通常: 保留理由はなし", auto[inbox.P_HOLD_REASON]["select"]["name"], "なし")
+
+# 知らない値・欠落は「なし」に倒さない（倒すと自動着手されてしまう）
+for broken in ({"human_reason": "でたらめ"}, {"human_reason": ""}, {}):
+    item = {"title": "x", "body": "x", "kind": "アイデア", "scheduled_date": "", **broken}
+    check(f"不正な保留理由は要確認へ倒す({broken})",
+          inbox.build_properties(item, spoken_at=None)[inbox.P_STATUS]["select"]["name"], "要確認")
+
+# 保留理由の選択肢が、Geminiに提示しているenumを網羅していること。
+# 別ファイルに同じ文字列を書いているので、片方だけ増やすと黙って握り潰される。
+check("保留理由: Geminiのenumをすべて知っている",
+      gemini.VALID_HUMAN_REASONS <= inbox.HOLD_REASONS, True)
+check("保留理由: DBの選択肢が定義と一致",
+      {o["name"] for o in inbox.SCHEMA[inbox.P_HOLD_REASON]["select"]["options"]},
+      set(inbox.HOLD_REASONS))
+check("保留理由: 「なし」以外はすべて対処法が書いてある",
+      set(inbox.HOLD_ACTIONS) | {inbox.HOLD_NONE}, set(inbox.HOLD_REASONS))
+check("保留理由: Geminiの既定値は要確認になる側",
+      gemini.DEFAULT_HUMAN_REASON != inbox.HOLD_NONE, True)
 
 # --- 着手対象でない種別は「対象外」にする -------------------------------------
 for kind in ("予定", "資料"):
     st = inbox.build_properties(
-        {"title": "x", "body": "x", "kind": kind, "scheduled_date": "", "needs_human": False},
+        {"title": "x", "body": "x", "kind": kind, "scheduled_date": "", "human_reason": "なし"},
         spoken_at=None,
     )[inbox.P_STATUS]["select"]["name"]
     check(f"{kind}: ステータスが対象外", st, "対象外")
 
-# 種別による判定が needs_human より優先される（予定はそもそも着手されないため）
+# 種別による判定が保留理由より優先される（予定はそもそも着手されないため）
 st = inbox.build_properties(
-    {"title": "x", "body": "x", "kind": "予定", "scheduled_date": "", "needs_human": True},
+    {"title": "x", "body": "x", "kind": "予定", "scheduled_date": "", "human_reason": "本人の判断"},
     spoken_at=None,
 )[inbox.P_STATUS]["select"]["name"]
-check("予定はneeds_humanでも対象外", st, "対象外")
+check("予定は保留理由があっても対象外", st, "対象外")
 
 check("対象外はステータスの選択肢にある",
       "対象外" in [o["name"] for o in inbox.SCHEMA[inbox.P_STATUS]["select"]["options"]], True)
@@ -216,13 +240,23 @@ check("対象外はステータスの選択肢にある",
 statuses = [c["select"]["equals"] for c in inbox.pending_filter()["or"]]
 check("着手フィルタは未処理と処理中だけ", sorted(statuses), sorted(["未処理", "処理中"]))
 
-# 値が欠けている場合は安全側（要確認）に倒す
+# 値が欠けている・enumにない場合は安全側（要確認）に倒す
 missing = gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア"}]))[0]
-check("needs_human欠落時は安全側(True)", missing["needs_human"], True)
+check("human_reason欠落時は安全側", missing["human_reason"], gemini.DEFAULT_HUMAN_REASON)
 check(
-    "needs_human=falseは尊重する",
-    gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア", "needs_human": False}]))[0]["needs_human"],
-    False,
+    "human_reasonがenum外なら安全側",
+    gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア", "human_reason": "でたらめ"}]))[0]["human_reason"],
+    gemini.DEFAULT_HUMAN_REASON,
+)
+check(
+    "human_reason=なしは尊重する",
+    gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア", "human_reason": "なし"}]))[0]["human_reason"],
+    "なし",
+)
+check(
+    "human_reason=クロコ自身の改修を尊重する",
+    gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア", "human_reason": "クロコ自身の改修"}]))[0]["human_reason"],
+    "クロコ自身の改修",
 )
 
 # --- 日付の正規化 ----------------------------------------------------------
@@ -332,6 +366,155 @@ with tempfile.TemporaryDirectory() as tmp:
     check("usage: 記録からcwdを読む", _usage._transcript_cwd(jsonl), "C:/work")
 
 check("usage: 記録が無ければNone", _usage.measure(Path(r"C:\存在しない"), since=0), None)
+
+# --- 連続処理のループ制御 ------------------------------------------------------
+# 実際にクロコを起動せずに止まり方だけを見たいので、dispatch.run を差し替える。
+from croco import dispatch as _dispatch  # noqa: E402
+
+O = _dispatch.Outcome
+
+
+def loop(outcomes, **env):
+    settings = {"_ENV_PATH": "dummy", "CROCO_PICK_TIMEOUT": "0"}
+    settings.update(env)
+    calls = []
+    original = _dispatch.run
+
+    def fake(config, *, exclude=frozenset()):
+        calls.append(exclude)
+        # 用意した数を超えて呼ばれたら「対象なし」を返す。
+        # 止まるべき所で止まらない不具合を、例外ではなく件数の食い違いとして出すため。
+        index = len(calls) - 1
+        return outcomes[index] if index < len(outcomes) else O(None, True, 0)
+
+    _dispatch.run = fake
+    try:
+        return _dispatch.run_all(Config(settings)), calls
+    finally:
+        _dispatch.run = original
+
+
+summary, calls = loop([O("a", True, 100), O("b", True, 200), O("c", True, 300), O("d", True, 400)])
+check("連続処理: 上限3件で止まる", (summary.items, len(calls)), (3, 3))
+check("連続処理: トークンを合計する", summary.tokens, 600)
+check("連続処理: 処理済みを次に渡して除外させる", calls[2], frozenset({"a", "b"}))
+
+summary, calls = loop([O("a", True, 10), O(None, True, 0)])
+check("連続処理: 対象が尽きたら止まる", (summary.items, len(calls)), (1, 2))
+
+summary, calls = loop([O("a", False, 50), O("b", True, 10)])
+check("連続処理: 異常終了・中断なら次に進まない", (summary.items, summary.tokens, len(calls)), (1, 50, 1))
+
+summary, _ = loop([O("a", True, 500), O("b", True, 500)], CROCO_TOKEN_BUDGET="400")
+check("連続処理: トークン上限を超えたら止まる", summary.items, 1)
+
+summary, calls = loop([O("a", True, 10), O("b", True, 10)], CROCO_MAX_ITEMS="1")
+check("連続処理: 上限1なら1件だけ", (summary.items, len(calls)), (1, 1))
+
+summary, calls = loop([O("a", True, 0), O("b", True, 0)], CROCO_DRY_RUN="1")
+check("連続処理: dry-runは1件だけ", (summary.items, len(calls)), (1, 1))
+
+summary, calls = loop([O("a", True, 10)], CROCO_MAX_ITEMS="0")
+check("連続処理: 上限0なら着手しない", (summary.items, len(calls)), (0, 0))
+
+# --- 「要確認」を保留理由ごとに束ねて出す -----------------------------------------
+from croco import log as _log, report as _report  # noqa: E402
+
+
+def review_item(title, reason):
+    props = {
+        inbox.P_TITLE: {"title": [{"plain_text": title}]},
+        inbox.P_STATUS: {"select": {"name": "要確認"}},
+    }
+    if reason is not None:
+        props[inbox.P_HOLD_REASON] = {"select": {"name": reason}}
+    return inbox.InboxItem({"id": title, "properties": props})
+
+
+lines = []
+original_log = _log.log
+_log.log = lines.append
+try:
+    _report._show_review([
+        review_item("旧いやつ", None),
+        review_item("研究室調べ", inbox.HOLD_JUDGEMENT),
+        review_item("dispatchを直して", inbox.HOLD_CROCO),
+        review_item("志望理由書", inbox.HOLD_DOCUMENT),
+        review_item("自己推薦書", inbox.HOLD_DOCUMENT),
+    ])
+finally:
+    _log.log = original_log
+
+heads = [l for l in lines if l.startswith("  【")]
+check("要確認: 同じ理由をまとめる", heads[0].startswith("  【本人名義の文書】2件"), True)
+check("要確認: 定義した順で出す",
+      [h.split("】")[0] for h in heads],
+      ["  【本人名義の文書", "  【クロコ自身の改修", "  【本人の判断", "  【（理由の記録なし）"])
+check("要確認: 対処法を添える", all(" … " in h for h in heads), True)
+check("要確認: 全件が出ている", len([l for l in lines if l.startswith("    ・")]), 5)
+check("要確認: InboxItemが保留理由を読める",
+      review_item("x", inbox.HOLD_CROCO).hold_reason, inbox.HOLD_CROCO)
+
+# --- 相談フェーズ ---------------------------------------------------------------
+from croco import consult as _consult  # noqa: E402
+
+check("相談: 全ての保留理由にクロコ向けの注意がある",
+      set(_consult.REASON_NOTES), set(inbox.HOLD_ACTIONS))
+check("相談: 「なし」には注意を持たない", inbox.HOLD_NONE in _consult.REASON_NOTES, False)
+check("既定の相談猶予", cfg.consult_timeout, 20.0)
+# 着手の猶予より短いこと。相談は「要確認」が1件でもあれば毎回出るので、
+# 長いと全処理が終わったあとに毎回その分だけ待たされる。
+check("相談の猶予は着手より短い", cfg.consult_timeout < cfg.pick_timeout, True)
+check("相談猶予0で聞かなくなる", Config({"CROCO_CONSULT_TIMEOUT": "0"}).consult_timeout, 0.0)
+check("エディタの既定パス", cfg.editor_path.name, "Twitter-like-char-counter.html")
+
+consult_prompt = _consult.PROMPT_TEMPLATE.format(
+    page_id="pid", title="自己推薦書", hold_reason=inbox.HOLD_DOCUMENT,
+    body="B", progress="P", reason_note=_consult.REASON_NOTES[inbox.HOLD_DOCUMENT],
+    cli_path="C:/cli.py", projects_dir="C:/proj",
+)
+check("相談: resume の呼び方が入っている", "resume pid" in consult_prompt, True)
+check("相談: log と review の呼び方も入っている",
+      ("log pid" in consult_prompt, "review pid" in consult_prompt), (True, True))
+check("相談: 推測で埋めるなと言っている", "推測で埋めない" in consult_prompt, True)
+check("相談: 文書なら本文を書かないと言っている", "本文はあなたが書きません" in consult_prompt, True)
+
+# --- 相談から戻ったアイテムが review に跳ね返らないこと ---------------------------
+# resume は保留理由を残す。残った理由が「着手してはいけないもの」に形の上で当たるため、
+# 但し書きが無いと resume と review を往復し続ける。
+resumed = inbox.InboxItem({
+    "id": "x",
+    "properties": {
+        inbox.P_TITLE: {"title": [{"plain_text": "自己推薦書"}]},
+        inbox.P_STATUS: {"select": {"name": inbox.STATUS_TODO}},
+        inbox.P_HOLD_REASON: {"select": {"name": inbox.HOLD_DOCUMENT}},
+    },
+})
+note = _dispatch._resumed_note(resumed)
+check("再開: 相談済みだと伝える", "相談済み" in note, True)
+check("再開: reviewに戻すなと言っている", "`review` に\n回す必要はありません" in note, True)
+check("再開: 線引きは守れと言っている", "線引きそのものは引き続き守る" in note, True)
+check("再開: 保留理由を本文に出す", inbox.HOLD_DOCUMENT in note, True)
+
+fresh = inbox.InboxItem({
+    "id": "y",
+    "properties": {
+        inbox.P_TITLE: {"title": [{"plain_text": "ロガー実装"}]},
+        inbox.P_STATUS: {"select": {"name": inbox.STATUS_TODO}},
+        inbox.P_HOLD_REASON: {"select": {"name": inbox.HOLD_NONE}},
+    },
+})
+check("再開: 普通のアイテムには付けない", _dispatch._resumed_note(fresh), "")
+check("再開: 保留理由が空でも付けない",
+      _dispatch._resumed_note(inbox.InboxItem({"id": "z", "properties": {}})), "")
+
+# 実装用プロンプトが組み立てられること（差し込み漏れがあると本番で落ちる）
+built = _dispatch.PROMPT_TEMPLATE.format(
+    page_id="pid", title="T", body="B", progress="P",
+    resumed_note=note, projects_dir="C:/proj", cli_path="C:/cli.py",
+)
+check("実装プロンプト: 相談済みの但し書きが入る", "相談済み" in built, True)
+check("実装プロンプト: 未展開の差し込みが残っていない", "{" in built.replace("{page_id}", ""), False)
 
 # --- 結果 ----------------------------------------------------------------
 if failures:

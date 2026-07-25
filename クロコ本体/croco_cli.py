@@ -9,6 +9,7 @@ Notion の資格情報をクロコのコンテキストに載せずに済み、
     python croco_cli.py log    <page_id> "進捗メッセージ"
     python croco_cli.py done   <page_id> "最終的な成果の要約"
     python croco_cli.py review <page_id> "確認してほしいこと"
+    python croco_cli.py resume <page_id> "決まったこと"
 """
 
 from __future__ import annotations
@@ -56,6 +57,15 @@ def main(argv: list[str]) -> int:
         properties[inbox.P_FINISHED_AT] = {"date": {"start": inbox.now_iso()}}
     elif command == "review":
         properties[inbox.P_STATUS] = {"select": {"name": inbox.STATUS_REVIEW}}
+        # 何で止まっているかをまとめで束ねられるよう、経路ごとに理由を残す。
+        properties[inbox.P_HOLD_REASON] = {"select": {"name": inbox.HOLD_ASKED}}
+    elif command == "resume":
+        # review の逆。話が決着したものを着手キューに戻す。
+        # **保留理由は消さない。** 「なぜ人が要ったか」はそのまま仕事の性質でもあり、
+        # 戻したあとの着手でも線引き（本人名義の文書なら本文を書かない等）に使う。
+        properties[inbox.P_STATUS] = {"select": {"name": inbox.STATUS_TODO}}
+        # 相談で止まっていた回は失敗ではないので、試行回数は数え直す。
+        properties[inbox.P_ATTEMPTS] = {"number": 0}
     else:
         print(f"不明なコマンド: {command}", file=sys.stderr)
         print(__doc__, file=sys.stderr)

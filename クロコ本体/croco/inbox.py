@@ -27,6 +27,10 @@ P_ATTEMPTS = "試行回数"
 # そのアイテムに費やしたトークン（セッションをまたいで積み上げる）。
 # 「どれくらい使いそうか」を過去の実績から見積もるための材料でもある。
 P_TOKENS = "トークン"
+# なぜ「要確認」に落ちたか。「要確認」が理由の分からない山になると、
+# 見るたびに1件ずつ「これは何で止まってるんだっけ」を思い出す羽目になる。
+# 隔離した側が理由を書き残しておけば、まとめで種類ごとに束ねて出せる。
+P_HOLD_REASON = "保留理由"
 
 # --- 選択肢 -----------------------------------------------------------
 
@@ -48,6 +52,32 @@ STATUS_REVIEW = "要確認"
 # そこに置き続けるとキューが濁る。かといって「完了」にすると、何もしていないのに
 # 完了したことになり、後から解析するときにデータが歪む。
 STATUS_EXCLUDED = "対象外"
+
+# --- 保留理由 ---------------------------------------------------------
+# 「要確認」に落ちる経路ごとに、何をすればいいかが1対1で決まるように分ける。
+# 前半4つは捕捉時にGeminiが判定するもの（gemini.py のenumと一致させること。
+# ズレていないかは test_offline.py で確認している）。後半2つはクロコ側で付ける。
+
+HOLD_NONE = "なし"  # 本人対応は不要＝自動で着手してよい
+HOLD_DOCUMENT = "本人名義の文書"
+HOLD_REAL_WORLD = "現実世界の行動"
+HOLD_CROCO = "クロコ自身の改修"
+HOLD_JUDGEMENT = "本人の判断"
+HOLD_RETRIES = "試行回数の上限"
+HOLD_ASKED = "クロコからの相談"
+
+# 表示順と、「で、何をすればいいのか」の一行。
+# ここに行動が書けない理由は、そもそも分類として役に立っていない。
+HOLD_ACTIONS: dict[str, str] = {
+    HOLD_DOCUMENT: "AIに書かせないと決めたもの。本人が書く（下調べまでは頼める）",
+    HOLD_REAL_WORLD: "取り寄せ・手続き・予約など。本人が動く",
+    HOLD_CROCO: "クロコ自身の改修。本人が普通にClaude Codeを開いて直す",
+    HOLD_JUDGEMENT: "本人の価値判断が中身のもの。決めてから戻す",
+    HOLD_RETRIES: "同じ失敗を繰り返して止まった。原因を見る",
+    HOLD_ASKED: "クロコが判断に詰まって聞いてきた。答えて「未処理」に戻す",
+}
+
+HOLD_REASONS = frozenset({HOLD_NONE, *HOLD_ACTIONS})
 
 # DB作成時に渡すスキーマ定義。
 SCHEMA: dict[str, Any] = {
@@ -80,6 +110,19 @@ SCHEMA: dict[str, Any] = {
     P_RESULT: {"rich_text": {}},
     P_ATTEMPTS: {"number": {"format": "number"}},
     P_TOKENS: {"number": {"format": "number"}},
+    P_HOLD_REASON: {
+        "select": {
+            "options": [
+                {"name": HOLD_NONE, "color": "default"},
+                {"name": HOLD_DOCUMENT, "color": "red"},
+                {"name": HOLD_REAL_WORLD, "color": "orange"},
+                {"name": HOLD_CROCO, "color": "purple"},
+                {"name": HOLD_JUDGEMENT, "color": "yellow"},
+                {"name": HOLD_RETRIES, "color": "brown"},
+                {"name": HOLD_ASKED, "color": "blue"},
+            ]
+        }
+    },
 }
 
 
@@ -120,12 +163,15 @@ def build_properties(item: dict, *, spoken_at: str | None) -> dict:
     # 本人自身が対応すべきものは、最初から自動キューに入れない。
     # 実装フェーズ側の指示（プロンプト）で自制させる方法もあるが、指示は破られうる。
     # 分類の段階で「要確認」に落としておけば、そもそも着手対象に選ばれない。
-    needs_human = bool(item.get("needs_human", False))
+    # 値が欠けていた・知らない値だった場合は安全側（本人対応が必要）に倒す。
+    reason = item.get("human_reason") or HOLD_JUDGEMENT
+    if reason not in HOLD_REASONS:
+        reason = HOLD_JUDGEMENT
 
     if kind in NON_IMPLEMENTABLE_KINDS:
         # 予定・資料はそもそも着手されないので、キューに残さない。
         status = STATUS_EXCLUDED
-    elif needs_human:
+    elif reason != HOLD_NONE:
         status = STATUS_REVIEW
     else:
         status = STATUS_TODO
@@ -135,12 +181,13 @@ def build_properties(item: dict, *, spoken_at: str | None) -> dict:
         P_KIND: {"select": {"name": kind}},
         P_STATUS: {"select": {"name": status}},
         P_ATTEMPTS: {"number": 0},
+        P_HOLD_REASON: {"select": {"name": reason}},
     }
     if status == STATUS_REVIEW:
         properties[P_RESULT] = {
             "rich_text": nt.rich_text(
                 f"[{now_iso()[:16].replace('T', ' ')}] "
-                "本人自身の対応が必要と判定したため、着手せず要確認にした"
+                f"着手せず要確認にした（{reason}）"
             )
         }
 
@@ -177,6 +224,7 @@ class InboxItem:
         self.status = nt.select_of(props.get(P_STATUS))
         self.scheduled = nt.date_of(props.get(P_SCHEDULED))
         self.result_log = nt.plain_text_of(props.get(P_RESULT))
+        self.hold_reason = nt.select_of(props.get(P_HOLD_REASON))
         attempts = props.get(P_ATTEMPTS) or {}
         self.attempts = int(attempts.get("number") or 0)
         tokens = props.get(P_TOKENS) or {}

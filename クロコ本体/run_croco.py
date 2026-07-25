@@ -4,7 +4,9 @@
 処理は2フェーズ:
 
   1. 捕捉  : 未処理置き場 → Gemini で分割 → Inbox DB → 処理済み置き場
-  2. 実装  : Inbox DB から1件選び、クロコ（Claude Code）を無人で起動
+  2. 実装  : Inbox DB からアイテムを選び、クロコ（Claude Code）を起動。
+             1件終わったら上限まで次へ続ける（CROCO_MAX_ITEMS）
+  3. 相談  : まとめを出したあと、「要確認」を今ここで話すか聞く（任意・既定は話さない）
 
 使い方:
     python run_croco.py              # 通常（捕捉 → 実装）
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 import sys
 
-from croco import capture, dispatch, httpjson, log, report
+from croco import capture, consult, dispatch, httpjson, log, report
 from croco.config import Config, ConfigError, load_env
 from croco.lock import AlreadyRunning, SingleInstance
 
@@ -47,6 +49,7 @@ def main(argv: list[str]) -> int:
         log.error("ネットワークに接続できません。今回は何もせず終了します。")
         return 1
 
+    summary = dispatch.RunSummary(0, 0)
     try:
         with SingleInstance(config.log_dir / "croco.lock"):
             if do_capture:
@@ -62,7 +65,7 @@ def main(argv: list[str]) -> int:
 
             if do_dispatch:
                 try:
-                    dispatch.run(config)
+                    summary = dispatch.run_all(config)
                 except ConfigError:
                     raise
                 except Exception as exc:
@@ -72,8 +75,15 @@ def main(argv: list[str]) -> int:
         return 0
 
     # 「要確認」はNotionを見に行かないと気づけないので、最後に必ず画面へ出す。
+    # 見た直後が「何を話すべきか」を一番分かっている瞬間なので、続けて相談も誘う。
     if not config.dry_run:
-        report.show(config)
+        items = report.show(config, run_items=summary.items, run_tokens=summary.tokens)
+        try:
+            consult.offer(config, items)
+        except KeyboardInterrupt:
+            log.log("相談を中断しました。")
+        except Exception as exc:
+            log.error(f"相談フェーズで想定外のエラー: {exc}")
 
     log.log("クロコを終了します。")
     return 0

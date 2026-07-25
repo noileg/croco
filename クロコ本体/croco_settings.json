@@ -24,6 +24,8 @@
       "Write(**/.env)",
       "Edit(**/クロコ本体/**)",
       "Write(**/クロコ本体/**)",
+      "Edit(**/下書き/**)",
+      "Write(**/下書き/**)",
       "Edit(**/.claude/**)",
       "Write(**/.claude/**)",
       "Edit(**/.ssh/**)",

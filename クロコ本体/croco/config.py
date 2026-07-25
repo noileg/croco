@@ -157,6 +157,25 @@ class Config:
         return int(self._get("CROCO_MAX_RETRIES", "3") or "3")
 
     @property
+    def max_items(self) -> int:
+        """1回の起動で連続して処理するアイテム数の上限（たたき台3件）。
+
+        1件終わるたびに次を取りに行くが、無制限にすると離席中に
+        プランの使用枠を使い切りうる。PC起動のたびに走るものなので上限は必ず要る。
+        0 にすると実装フェーズを何もしない（捕捉だけしたいときの逃げ道）。
+        """
+        return int(self._get("CROCO_MAX_ITEMS", "3") or "3")
+
+    @property
+    def token_budget(self) -> int:
+        """1回の起動で使ってよいトークンの目安。0 で無制限（既定）。
+
+        アイテムの途中で打ち切ることはできないので、
+        「次を始めるかどうか」の判断にだけ使う。超過したら次に進まない。
+        """
+        return int(self._get("CROCO_TOKEN_BUDGET", "0") or "0")
+
+    @property
     def projects_dir(self) -> Path:
         """クロコが無人実装するプロジェクトの置き場（仕様書2.5章-13）。
 
@@ -166,6 +185,19 @@ class Config:
         if value:
             return Path(value)
         return CROCO_HOME.parent / "クロコ管轄プロジェクト"
+
+    @property
+    def editor_path(self) -> Path | None:
+        """下書きエディタ（ブラウザで開くHTML）の場所。
+
+        本人が書く文書のときだけ開く。クロコはCLIなので文章を書く場所にならず、
+        書くのは本人・相談相手がクロコ、という分担にしているため。
+        無ければ開かないだけなので必須ではない。
+        """
+        value = self._env.get("CROCO_EDITOR_PATH")
+        if value:
+            return Path(value)
+        return CROCO_HOME.parent.parent / "プログラミング関係" / "Twitter-like-char-counter.html"
 
     @property
     def log_dir(self) -> Path:
@@ -181,6 +213,17 @@ class Config:
         PC起動時に無人で走ることが前提なので、待ち続けない。
         """
         return float(self._get("CROCO_PICK_TIMEOUT", "60") or "60")
+
+    @property
+    def consult_timeout(self) -> float:
+        """相談するか聞く猶予（秒）。0以下で「聞かない」。
+
+        着手アイテムを選ぶとき（pick_timeout）より短くしてある。
+        あちらは複数候補があるときだけ出るが、こちらは「要確認」が1件でもあれば出る。
+        つまり**ほぼ毎回の起動で出る**ので、長いとその分だけ毎回待たされる。
+        しかも全処理が終わったあとなので、待っている間は何も進んでいない。
+        """
+        return float(self._get("CROCO_CONSULT_TIMEOUT", "20") or "20")
 
     @property
     def interactive(self) -> bool:
