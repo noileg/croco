@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 
 from .config import CROCO_HOME, Config
-from . import inbox, log
+from . import inbox, log, notify
 from . import notion as nt
 from .dispatch import launch_claude, open_editor, read_line
 
@@ -123,6 +123,10 @@ def offer(config: Config, items: list[inbox.InboxItem] | None) -> bool:
     review = [item for item in (items or []) if item.status == inbox.STATUS_REVIEW]
     if not review:
         return False
+
+    # 20秒しか待たないので、別ウィンドウを見ていると気づかずに流れる。
+    # 一覧を出す前に鳴らして、画面に目を戻す時間を作る。
+    notify.waiting(config)
 
     log.log("")
     log.log("この中で今ここで話すものはありますか？")

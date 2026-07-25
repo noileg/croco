@@ -241,6 +241,18 @@ class Config:
         )
 
     @property
+    def notify(self) -> bool:
+        """節目で音を鳴らすか（既定：鳴らす）。
+
+        鳴らすのは「入力待ちになった」「全部終わった」の2つだけ（仕様書4章）。
+        """
+        return (self._get("CROCO_NOTIFY", "1") or "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+
+    @property
     def claude_command(self) -> str:
         return self._get("CROCO_CLAUDE_COMMAND", "claude") or "claude"
 

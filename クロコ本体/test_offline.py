@@ -468,6 +468,52 @@ check("相談の猶予は着手より短い", cfg.consult_timeout < cfg.pick_tim
 check("相談猶予0で聞かなくなる", Config({"CROCO_CONSULT_TIMEOUT": "0"}).consult_timeout, 0.0)
 check("エディタの既定パス", cfg.editor_path.name, "Twitter-like-char-counter.html")
 
+# --- 通知音 -----------------------------------------------------------------
+from croco import notify as _notify  # noqa: E402
+
+check("既定で通知は鳴る", cfg.notify, True)
+check("CROCO_NOTIFY=0 で止まる", Config({"CROCO_NOTIFY": "0"}).notify, False)
+# 2つの合図は聞き分けられる必要がある（画面を見ずに判断するため）
+check("2つの合図が違う音", _notify.WAITING != _notify.FINISHED, True)
+check("入力待ちは音が上がる",
+      _notify.WAITING[-1][0] > _notify.WAITING[0][0], True)
+check("終了は音が下がる",
+      _notify.FINISHED[-1][0] < _notify.FINISHED[0][0], True)
+# イヤホンで聞くので、耳に痛い高音や長すぎる音を混ぜない
+check("周波数が常識的な範囲",
+      all(400 <= f <= 2000 for f, _ in _notify.WAITING + _notify.FINISHED), True)
+check("鳴らす時間の合計が1秒未満",
+      sum(d for _, d in _notify.WAITING + _notify.FINISHED) < 1000, True)
+
+# 鳴らせない環境でも落ちないこと（音は出なくてよいが、処理は続かなければ困る）
+_saved = _notify.winsound
+try:
+    _notify.winsound = None
+    _notify.waiting(cfg)
+    _notify.finished(cfg)
+    check("winsoundが無くても落ちない", True, True)
+    class _Broken:
+        @staticmethod
+        def Beep(f, d):
+            raise OSError("鳴らせない")
+    _notify.winsound = _Broken
+    _notify.waiting(cfg)
+    check("鳴らせなくても落ちない", True, True)
+finally:
+    _notify.winsound = _saved
+
+# 通知が切ってあるときは winsound に触れもしないこと
+class _MustNotBeCalled:
+    @staticmethod
+    def Beep(f, d):
+        failures.append("通知が切ってあるのに鳴らそうとした")
+_saved = _notify.winsound
+try:
+    _notify.winsound = _MustNotBeCalled
+    _notify.waiting(Config({"CROCO_NOTIFY": "0"}))
+finally:
+    _notify.winsound = _saved
+
 consult_prompt = _consult.PROMPT_TEMPLATE.format(
     page_id="pid", title="自己推薦書", hold_reason=inbox.HOLD_DOCUMENT,
     body="B", progress="P", reason_note=_consult.REASON_NOTES[inbox.HOLD_DOCUMENT],

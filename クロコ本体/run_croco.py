@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sys
 
-from croco import capture, consult, dispatch, httpjson, log, report
+from croco import capture, consult, dispatch, httpjson, log, notify, report
 from croco.config import Config, ConfigError, load_env
 from croco.lock import AlreadyRunning, SingleInstance
 
@@ -50,11 +50,13 @@ def main(argv: list[str]) -> int:
         return 1
 
     summary = dispatch.RunSummary(0, 0)
+    captured = 0
+    consulted = False
     try:
         with SingleInstance(config.log_dir / "croco.lock"):
             if do_capture:
                 try:
-                    count = capture.run(config)
+                    captured = count = capture.run(config)
                     log.log(f"捕捉フェーズ完了: {count}件をInbox DBに登録しました。")
                 except ConfigError:
                     raise
@@ -79,13 +81,17 @@ def main(argv: list[str]) -> int:
     if not config.dry_run:
         items = report.show(config, run_items=summary.items, run_tokens=summary.tokens)
         try:
-            consult.offer(config, items)
+            consulted = consult.offer(config, items)
         except KeyboardInterrupt:
             log.log("相談を中断しました。")
         except Exception as exc:
             log.error(f"相談フェーズで想定外のエラー: {exc}")
 
     log.log("クロコを終了します。")
+    # 何かした時だけ鳴らす。何も無かった起動でも鳴らすと、ただの雑音になって
+    # 「鳴ったら見に行く」が成り立たなくなる。
+    if captured or summary.items or consulted:
+        notify.finished(config)
     return 0
 
 
