@@ -180,7 +180,7 @@ class Config:
 
         PC起動時に無人で走ることが前提なので、待ち続けない。
         """
-        return float(self._get("CROCO_PICK_TIMEOUT", "15") or "15")
+        return float(self._get("CROCO_PICK_TIMEOUT", "60") or "60")
 
     @property
     def claude_command(self) -> str:
