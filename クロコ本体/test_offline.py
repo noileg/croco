@@ -128,7 +128,7 @@ props = inbox.build_properties(
     {"title": "予定の件", "body": "x", "kind": "予定", "scheduled_date": "2026-08-03"},
     spoken_at="2026-07-25T10:00:00.000Z",
 )
-check("inbox: ステータス固定", props[inbox.P_STATUS]["select"]["name"], "未処理")
+check("inbox: 予定は対象外で作られる", props[inbox.P_STATUS]["select"]["name"], "対象外")
 check("inbox: 試行回数初期値", props[inbox.P_ATTEMPTS]["number"], 0)
 check("inbox: 予定日", props[inbox.P_SCHEDULED]["date"]["start"], "2026-08-03")
 check("inbox: 発話日時", props[inbox.P_SPOKEN_AT]["date"]["start"], "2026-07-25T10:00:00.000Z")
@@ -193,6 +193,28 @@ auto = inbox.build_properties(
 )
 check("通常: ステータスが未処理", auto[inbox.P_STATUS]["select"]["name"], "未処理")
 check("通常: 実行結果は空のまま", inbox.P_RESULT in auto, False)
+
+# --- 着手対象でない種別は「対象外」にする -------------------------------------
+for kind in ("予定", "資料"):
+    st = inbox.build_properties(
+        {"title": "x", "body": "x", "kind": kind, "scheduled_date": "", "needs_human": False},
+        spoken_at=None,
+    )[inbox.P_STATUS]["select"]["name"]
+    check(f"{kind}: ステータスが対象外", st, "対象外")
+
+# 種別による判定が needs_human より優先される（予定はそもそも着手されないため）
+st = inbox.build_properties(
+    {"title": "x", "body": "x", "kind": "予定", "scheduled_date": "", "needs_human": True},
+    spoken_at=None,
+)[inbox.P_STATUS]["select"]["name"]
+check("予定はneeds_humanでも対象外", st, "対象外")
+
+check("対象外はステータスの選択肢にある",
+      "対象外" in [o["name"] for o in inbox.SCHEMA[inbox.P_STATUS]["select"]["options"]], True)
+
+# 着手候補を拾うフィルタが対象外を含まないこと
+statuses = [c["select"]["equals"] for c in inbox.pending_filter()["or"]]
+check("着手フィルタは未処理と処理中だけ", sorted(statuses), sorted(["未処理", "処理中"]))
 
 # 値が欠けている場合は安全側（要確認）に倒す
 missing = gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア"}]))[0]

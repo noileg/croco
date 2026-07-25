@@ -40,6 +40,11 @@ STATUS_TODO = "未処理"
 STATUS_DOING = "処理中"
 STATUS_DONE = "完了"
 STATUS_REVIEW = "要確認"
+# 実装フェーズの対象ではないもの（予定・資料）。
+# 「未処理」は着手待ちのフラグとして機能しているので、着手されようのないものを
+# そこに置き続けるとキューが濁る。かといって「完了」にすると、何もしていないのに
+# 完了したことになり、後から解析するときにデータが歪む。
+STATUS_EXCLUDED = "対象外"
 
 # DB作成時に渡すスキーマ定義。
 SCHEMA: dict[str, Any] = {
@@ -61,6 +66,7 @@ SCHEMA: dict[str, Any] = {
                 {"name": STATUS_DOING, "color": "yellow"},
                 {"name": STATUS_DONE, "color": "green"},
                 {"name": STATUS_REVIEW, "color": "red"},
+                {"name": STATUS_EXCLUDED, "color": "gray"},
             ]
         }
     },
@@ -105,19 +111,28 @@ def build_properties(item: dict, *, spoken_at: str | None) -> dict:
     ステータスは作成時つねに「未処理」固定なのでここでハードコードする
     （Gemini のスキーマには含めない：仕様書2.5章-11）。
     """
+    kind = item.get("kind") or KIND_IDEA
+
     # 本人自身が対応すべきものは、最初から自動キューに入れない。
     # 実装フェーズ側の指示（プロンプト）で自制させる方法もあるが、指示は破られうる。
     # 分類の段階で「要確認」に落としておけば、そもそも着手対象に選ばれない。
     needs_human = bool(item.get("needs_human", False))
+
+    if kind in NON_IMPLEMENTABLE_KINDS:
+        # 予定・資料はそもそも着手されないので、キューに残さない。
+        status = STATUS_EXCLUDED
+    elif needs_human:
+        status = STATUS_REVIEW
+    else:
+        status = STATUS_TODO
+
     properties: dict[str, Any] = {
         P_TITLE: {"title": nt.rich_text(item["title"])},
-        P_KIND: {"select": {"name": item.get("kind") or KIND_IDEA}},
-        P_STATUS: {
-            "select": {"name": STATUS_REVIEW if needs_human else STATUS_TODO}
-        },
+        P_KIND: {"select": {"name": kind}},
+        P_STATUS: {"select": {"name": status}},
         P_ATTEMPTS: {"number": 0},
     }
-    if needs_human:
+    if status == STATUS_REVIEW:
         properties[P_RESULT] = {
             "rich_text": nt.rich_text(
                 f"[{now_iso()[:16].replace('T', ' ')}] "
