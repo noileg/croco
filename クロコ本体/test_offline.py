@@ -96,7 +96,7 @@ def response_with(items):
 parsed_items = gemini._parse_items(
     response_with(
         [
-            {"title": "案A", "body": "本文A", "kind": "アイデア", "scheduled_date": ""},
+            {"title": "案A", "body": "本文A", "kind": "アイデア", "scheduled_date": "", "scheduled_end": ""},
             {"title": "", "body": "タイトル無しの本文", "kind": "予定", "scheduled_date": "2026-08-03"},
             {"title": "空本文", "body": "   ", "kind": "アイデア", "scheduled_date": ""},
             {"title": "変な種別", "body": "本文C", "kind": "その他", "scheduled_date": ""},
@@ -106,6 +106,11 @@ parsed_items = gemini._parse_items(
 check("gemini: 空本文を除外", len(parsed_items), 3)
 check("gemini: タイトル補完", parsed_items[1]["title"], "タイトル無しの本文")
 check("gemini: 未知の種別はアイデアに寄せる", parsed_items[2]["kind"], "アイデア")
+check(
+    "gemini: 資料は有効な種別として通す",
+    gemini._parse_items(response_with([{"title": "前提", "body": "注意事項", "kind": "資料", "scheduled_date": ""}]))[0]["kind"],
+    "資料",
+)
 
 for bad, label in [
     ({"candidates": []}, "候補なし"),
@@ -141,6 +146,63 @@ bad_date_props = inbox.build_properties(
 )
 check("inbox: 非ISO日付は落として本文を残す", inbox.P_SCHEDULED in bad_date_props, False)
 
+# --- 期間（開始〜終了） ------------------------------------------------------
+span = inbox.build_properties(
+    {"title": "出願期間", "body": "x", "kind": "予定",
+     "scheduled_date": "2026-08-06", "scheduled_end": "2026-08-12"},
+    spoken_at=None,
+)[inbox.P_SCHEDULED]["date"]
+check("期間: 開始", span["start"], "2026-08-06")
+check("期間: 終了", span.get("end"), "2026-08-12")
+
+single = inbox.build_properties(
+    {"title": "発表", "body": "x", "kind": "予定",
+     "scheduled_date": "2026-10-01", "scheduled_end": ""},
+    spoken_at=None,
+)[inbox.P_SCHEDULED]["date"]
+check("単日: endを付けない", "end" in single, False)
+
+reversed_span = inbox.build_properties(
+    {"title": "逆転", "body": "x", "kind": "予定",
+     "scheduled_date": "2026-08-12", "scheduled_end": "2026-08-06"},
+    spoken_at=None,
+)[inbox.P_SCHEDULED]["date"]
+check("終了が開始より前なら捨てる", "end" in reversed_span, False)
+
+bad_end = inbox.build_properties(
+    {"title": "不正な終了", "body": "x", "kind": "予定",
+     "scheduled_date": "2026-08-06", "scheduled_end": "8月12日"},
+    spoken_at=None,
+)[inbox.P_SCHEDULED]["date"]
+check("非ISOの終了は捨てるが開始は残す", ("end" in bad_end, bad_end["start"]), (False, "2026-08-06"))
+
+# --- 本人対応が必要なものは着手キューに入れない -------------------------------
+human = inbox.build_properties(
+    {"title": "自己推薦書作成", "body": "x", "kind": "アイデア",
+     "scheduled_date": "", "needs_human": True},
+    spoken_at=None,
+)
+check("本人対応: ステータスが要確認", human[inbox.P_STATUS]["select"]["name"], "要確認")
+sent_text = "".join(c["text"]["content"] for c in human[inbox.P_RESULT]["rich_text"])
+check("本人対応: 理由が実行結果に残る", "要確認" in sent_text, True)
+
+auto = inbox.build_properties(
+    {"title": "ロガー実装", "body": "x", "kind": "アイデア",
+     "scheduled_date": "", "needs_human": False},
+    spoken_at=None,
+)
+check("通常: ステータスが未処理", auto[inbox.P_STATUS]["select"]["name"], "未処理")
+check("通常: 実行結果は空のまま", inbox.P_RESULT in auto, False)
+
+# 値が欠けている場合は安全側（要確認）に倒す
+missing = gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア"}]))[0]
+check("needs_human欠落時は安全側(True)", missing["needs_human"], True)
+check(
+    "needs_human=falseは尊重する",
+    gemini._parse_items(response_with([{"title": "T", "body": "B", "kind": "アイデア", "needs_human": False}]))[0]["needs_human"],
+    False,
+)
+
 # --- 日付の正規化 ----------------------------------------------------------
 check("date: 日付のみ", inbox.normalize_date("2026-08-03"), "2026-08-03")
 check("date: 日時", inbox.normalize_date("2026-08-03T14:30:00"), "2026-08-03T14:30:00")
@@ -175,8 +237,48 @@ items = [
 ]
 items.sort(key=inbox.sort_key)
 check("並び順: 処理中が先頭", items[0].status, "処理中")
+
+# --- 実装フェーズが着手しない種別 --------------------------------------------
+check("着手対象外: 予定", "予定" in inbox.NON_IMPLEMENTABLE_KINDS, True)
+check("着手対象外: 資料", "資料" in inbox.NON_IMPLEMENTABLE_KINDS, True)
+check("着手対象: アイデア", "アイデア" in inbox.NON_IMPLEMENTABLE_KINDS, False)
+check("種別の選択肢に資料がある", "資料" in [o["name"] for o in inbox.SCHEMA[inbox.P_KIND]["select"]["options"]], True)
 check("並び順: 未処理は古い順", [i.page["created_time"] for i in items[1:]], ["2026-06-01", "2026-07-01"])
 check("InboxItem: 試行回数", make_item("未処理", "x", attempts=2).attempts, 2)
+
+# --- stream-json の描画 ------------------------------------------------------
+from croco.dispatch import _render_event  # noqa: E402
+
+
+def ev(obj):
+    return _render_event(json.dumps(obj))
+
+
+check("描画: 本文の前後空白を落とす", ev({"type": "assistant", "message": {"content": [{"type": "text", "text": "  調べます  "}]}}), ["調べます"])
+check(
+    "描画: ツールは名前と要点だけ",
+    ev({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "input": {"file_path": "a.md", "content": "長い本文" * 100}}]}}),
+    ["  → Write: a.md"],
+)
+check(
+    "描画: 長いコマンドは切り詰める",
+    len(ev({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "x" * 500}}]}})[0]) < 140,
+    True,
+)
+check(
+    "描画: ツール結果はエラー件数を出す",
+    ev({"type": "user", "message": {"content": [{"type": "tool_result"}, {"type": "tool_result", "is_error": True}]}}),
+    ["  ← ツール結果: 2件（うちエラー 1件）"],
+)
+check("描画: 未知のイベントは黙殺", ev({"type": "未知"}), [])
+check("描画: 空行は黙殺", _render_event("   "), [])
+check("描画: JSONでない行はそのまま出す", _render_event("raw line"), ["raw line"])
+check("描画: JSON配列でも落ちない", _render_event("[1,2]"), ["[1,2]"])
+check(
+    "描画: 完了イベント",
+    ev({"type": "result", "subtype": "success", "num_turns": 7, "total_cost_usd": 0.1234, "result": "できました"}),
+    ["[完了] success / 7ターン / $0.1234", "できました"],
+)
 
 # --- 結果 ----------------------------------------------------------------
 if failures:

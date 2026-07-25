@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import sys
 
-from croco import capture, dispatch, log
+from croco import capture, dispatch, httpjson, log
 from croco.config import Config, ConfigError, load_env
+from croco.lock import AlreadyRunning, SingleInstance
 
 
 def main(argv: list[str]) -> int:
@@ -37,24 +38,35 @@ def main(argv: list[str]) -> int:
     if config.dry_run:
         log.log("dry-run モードです。Notionへの書き込みとクロコの起動は行いません。")
 
-    if do_capture:
-        try:
-            count = capture.run(config)
-            log.log(f"捕捉フェーズ完了: {count}件をInbox DBに登録しました。")
-        except ConfigError:
-            raise
-        except Exception as exc:
-            # 捕捉に失敗しても、既にInboxにあるアイテムの実装は進められる。
-            # ここで止めない方が「起動したら何かしら前に進む」状態を保てる。
-            log.error(f"捕捉フェーズで想定外のエラー: {exc}")
+    # PC起動直後は回線がまだ上がっていないことがある。
+    # ここで待たないと、起動のたびに何もせず終わる無言の失敗になりうる。
+    if not httpjson.wait_for_network():
+        log.error("ネットワークに接続できません。今回は何もせず終了します。")
+        return 1
 
-    if do_dispatch:
-        try:
-            dispatch.run(config)
-        except ConfigError:
-            raise
-        except Exception as exc:
-            log.error(f"実装フェーズで想定外のエラー: {exc}")
+    try:
+        with SingleInstance(config.log_dir / "croco.lock"):
+            if do_capture:
+                try:
+                    count = capture.run(config)
+                    log.log(f"捕捉フェーズ完了: {count}件をInbox DBに登録しました。")
+                except ConfigError:
+                    raise
+                except Exception as exc:
+                    # 捕捉に失敗しても、既にInboxにあるアイテムの実装は進められる。
+                    # ここで止めない方が「起動したら何かしら前に進む」状態を保てる。
+                    log.error(f"捕捉フェーズで想定外のエラー: {exc}")
+
+            if do_dispatch:
+                try:
+                    dispatch.run(config)
+                except ConfigError:
+                    raise
+                except Exception as exc:
+                    log.error(f"実装フェーズで想定外のエラー: {exc}")
+    except AlreadyRunning as exc:
+        log.warn(f"{exc} 今回は何もせず終了します。")
+        return 0
 
     log.log("クロコを終了します。")
     return 0

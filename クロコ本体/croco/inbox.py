@@ -29,6 +29,12 @@ P_ATTEMPTS = "試行回数"
 
 KIND_IDEA = "アイデア"
 KIND_SCHEDULE = "予定"
+KIND_MATERIAL = "資料"
+
+# 実装フェーズが着手しない種別。
+# 「予定」はカレンダー表示用、「資料」は参照用で、どちらも実装の対象ではない。
+# これらを弾かないと、実装フェーズが順番に拾って「実装しよう」としてしまう。
+NON_IMPLEMENTABLE_KINDS = frozenset({KIND_SCHEDULE, KIND_MATERIAL})
 
 STATUS_TODO = "未処理"
 STATUS_DOING = "処理中"
@@ -43,6 +49,7 @@ SCHEMA: dict[str, Any] = {
             "options": [
                 {"name": KIND_IDEA, "color": "blue"},
                 {"name": KIND_SCHEDULE, "color": "green"},
+                {"name": KIND_MATERIAL, "color": "gray"},
             ]
         }
     },
@@ -98,19 +105,38 @@ def build_properties(item: dict, *, spoken_at: str | None) -> dict:
     ステータスは作成時つねに「未処理」固定なのでここでハードコードする
     （Gemini のスキーマには含めない：仕様書2.5章-11）。
     """
+    # 本人自身が対応すべきものは、最初から自動キューに入れない。
+    # 実装フェーズ側の指示（プロンプト）で自制させる方法もあるが、指示は破られうる。
+    # 分類の段階で「要確認」に落としておけば、そもそも着手対象に選ばれない。
+    needs_human = bool(item.get("needs_human", False))
     properties: dict[str, Any] = {
         P_TITLE: {"title": nt.rich_text(item["title"])},
         P_KIND: {"select": {"name": item.get("kind") or KIND_IDEA}},
-        P_STATUS: {"select": {"name": STATUS_TODO}},
+        P_STATUS: {
+            "select": {"name": STATUS_REVIEW if needs_human else STATUS_TODO}
+        },
         P_ATTEMPTS: {"number": 0},
     }
+    if needs_human:
+        properties[P_RESULT] = {
+            "rich_text": nt.rich_text(
+                f"[{now_iso()[:16].replace('T', ' ')}] "
+                "本人自身の対応が必要と判定したため、着手せず要確認にした"
+            )
+        }
 
     # Geminiが日付を取れていれば入れる。「アイデア」に分類されたものでも
     # 日付が取れているなら捨てない（分類を誤っていた場合に情報が失われるため。
     # カレンダー表示は種別で絞られるので、入っていても表示は乱れない）。
     scheduled = normalize_date(item.get("scheduled_date"))
     if scheduled:
-        properties[P_SCHEDULED] = {"date": {"start": scheduled}}
+        value = {"start": scheduled}
+        # 「〜から〜まで」の期間は終了日も持たせる。
+        # Notionは end < start を拒否するので、逆転していたら捨てる。
+        end = normalize_date(item.get("scheduled_end"))
+        if end and end > scheduled:
+            value["end"] = end
+        properties[P_SCHEDULED] = {"date": value}
 
     # 「未処理置き場」子ページの作成日時をそのまま写す。
     # LLMに現在時刻を自己申告させない（仕様書2.5章-10）。

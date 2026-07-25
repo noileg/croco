@@ -79,6 +79,16 @@ powershell -ExecutionPolicy Bypass -File launcher\install_startup.ps1
 
 止めるときは `-Remove` を付けて実行する。
 
+**先に `.env` の `CROCO_CLAUDE_COMMAND` に `claude` のフルパスを設定しておくこと。**
+`claude` は永続PATH（User/Machine）に入っていないことがあり、その場合
+スタートアップから起動したプロセスからは見つからない。
+捕捉フェーズだけ動いて実装フェーズが毎回失敗する、という気づきにくい壊れ方をする。
+
+`launcher\croco.bat` を編集するときは **ASCIIのみで書くこと**。
+cmd.exeはバッチを実行中のコードページで読み直すため、日本語を混ぜると
+`chcp 65001` との組み合わせでパースが壊れ、成功時にも `pause` が走って
+コンソールが居座る。日本語の出力はPython側に任せる。
+
 ## 使い方
 
 ```
@@ -100,11 +110,18 @@ python run_croco.py --dry-run  # 書き込まず、何をするかだけ表示
 
 | 層 | 手段 |
 |---|---|
+| 分類ベース | 本人自身が対応すべきものは、捕捉時点で「要確認」にして自動キューに入れない |
 | 行為ベース | `croco_settings.json` の deny リスト（履歴破壊・広範囲削除・外部公開・鍵の読み取り等） |
 | 判定ベース | `--permission-mode auto` の内蔵判定 |
 | 範囲ベース | 作業ディレクトリを `クロコ管轄プロジェクト` 配下に限定（`--add-dir`） |
 | 権限ベース | Notionトークンの接続先を必要なページ・DBだけに絞る |
 | 回数ベース | 同一アイテムの試行回数が上限を超えたら「要確認」に落とす |
+
+一番上の「分類ベース」が実務上いちばん効く。自己推薦書・志望理由書のような
+**AIに書かせてはいけない文書**や、書類の取り寄せのような**現実世界の行動**は、
+Geminiが捕捉の段階で判定して「要確認」に隔離するので、そもそも着手対象に選ばれない。
+実装フェーズのプロンプトにも同じ線引きを書いてあるが、そちらは指示であって
+保証ではないので、分類の段階で弾くことを主の防御としている。
 
 deny リストはどのパーミッションモードでも効く最後の砦なので、
 `croco_settings.json` には「絶対にやってほしくないこと」だけを書く。
@@ -138,7 +155,8 @@ cd tmpcheck && claude doctor
   .env.example          設定ファイルの雛形
   croco/
     config.py           .env の読み込みと設定値
-    httpjson.py         JSON over HTTP（リトライ付き）
+    httpjson.py         JSON over HTTP（リトライ・起動時のネットワーク待ち付き）
+    lock.py             二重起動の防止
     notion.py           Notion API
     gemini.py           Gemini API（分割・逐語転記の指示を含む）
     inbox.py            Inbox DB のスキーマと読み書き

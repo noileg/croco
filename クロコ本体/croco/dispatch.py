@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -58,6 +59,18 @@ python "{cli_path}" done {page_id} "最終的な成果の要約"
 python "{cli_path}" review {page_id} "何を確認してほしいか"
 ```
 
+## 着手してはいけないもの
+以下に該当する場合は、**内容を書き始めず** `review` に回して終了してください。
+本人の判断が要るものを無人で進めてはいけません。
+
+- **本人名義で提出する文書の作成**：自己推薦書、志望理由書、出願書類、
+  大学のレポート、エントリーシート等。AIが書いたことが問題になり得るため、
+  これらは無人実行の対象外と決められています。
+  下調べや必要書類の洗い出しまでは可能ですが、本文は書かないでください。
+- **現実世界の行動が必要なもの**：書類の取り寄せ、郵送、窓口手続き、予約など。
+  あなたには実行できないので、何が必要かを整理して `review` に回してください。
+- **課金・契約・外部への送信を伴う操作**。
+
 ## 進め方
 - 1回の起動で全部終わらせる必要はありません。中断しても次回の起動で続きから再開できます。
 - 終わらない場合も、必ず `log` で進捗を残してから終了してください。次回のあなたはそれだけを頼りに再開します。
@@ -76,8 +89,10 @@ def run(config: Config) -> bool:
     pages = client.query_data_source(data_source_id, filter_=inbox.pending_filter())
     items = [inbox.InboxItem(page) for page in pages]
 
-    # 「予定」は実装対象ではなくカレンダー表示用なので着手しない（仕様書2.5章-6）。
-    targets = [item for item in items if item.kind != inbox.KIND_SCHEDULE]
+    # 「予定」（カレンダー表示用）と「資料」（参照用）は実装対象ではない。
+    targets = [
+        item for item in items if item.kind not in inbox.NON_IMPLEMENTABLE_KINDS
+    ]
     if not targets:
         log.log("着手できるアイテムはありませんでした。")
         return False
@@ -160,6 +175,108 @@ def _build_prompt(config: Config, item: inbox.InboxItem, body: str) -> str:
     )
 
 
+def _render_event(line: str) -> list[str]:
+    """stream-json の1行を、画面に出す読める形へ変換する。
+
+    形式が想定と違っても落とさない。可視化のための処理であって、
+    ここで例外を投げて実装フェーズ全体を落とすのは本末転倒なため、
+    解釈できないものは生のまま出す。
+    """
+    text = line.strip()
+    if not text:
+        return []
+    try:
+        event = json.loads(text)
+    except json.JSONDecodeError:
+        return [text]
+    if not isinstance(event, dict):
+        return [text]
+
+    kind = event.get("type")
+
+    if kind == "assistant":
+        return _render_assistant(event.get("message") or {})
+
+    if kind == "user":
+        # ツールの実行結果。全文を出すと膨大になるので件数だけ示す。
+        blocks = ((event.get("message") or {}).get("content")) or []
+        results = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"]
+        errors = [b for b in results if b.get("is_error")]
+        if errors:
+            return [f"  ← ツール結果: {len(results)}件（うちエラー {len(errors)}件）"]
+        return [f"  ← ツール結果: {len(results)}件"] if results else []
+
+    if kind == "result":
+        parts = [f"[完了] {event.get('subtype', '')}"]
+        if event.get("num_turns"):
+            parts.append(f"{event['num_turns']}ターン")
+        if event.get("total_cost_usd"):
+            parts.append(f"${event['total_cost_usd']:.4f}")
+        summary = " / ".join(parts)
+        final = (event.get("result") or "").strip()
+        return [summary, final] if final else [summary]
+
+    if kind == "system" and event.get("subtype") == "init":
+        return [f"[起動] model={event.get('model', '?')} cwd={event.get('cwd', '?')}"]
+
+    return []
+
+
+def _render_assistant(message: dict) -> list[str]:
+    lines: list[str] = []
+    for block in message.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            body = (block.get("text") or "").strip()
+            if body:
+                lines.append(body)
+        elif block.get("type") == "tool_use":
+            lines.append(f"  → {block.get('name', '?')}: {_summarize_tool_input(block.get('input'))}")
+    return lines
+
+
+def _summarize_tool_input(value: object) -> str:
+    """ツールの引数を1行に収める。長い本文で画面が埋まるのを防ぐ。"""
+    if not isinstance(value, dict):
+        return ""
+    for key in ("command", "file_path", "pattern", "path", "url", "prompt", "description"):
+        found = value.get(key)
+        if isinstance(found, str) and found.strip():
+            flat = " ".join(found.split())
+            return flat[:120] + ("…" if len(flat) > 120 else "")
+    return ", ".join(sorted(value)[:5])
+
+
+def _resolve_claude(config: Config) -> str | None:
+    """claude の実行ファイルを探す。
+
+    PATH だけに頼らないのが要点。`claude` はインストーラが対話セッションにしか
+    通していない場合があり（このPCでは実際にUser/Machineどちらの永続PATHにも
+    入っていなかった）、スタートアップから起動したプロセスでは見つからない。
+    捕捉フェーズだけ動いて実装フェーズが毎回失敗する、という分かりにくい壊れ方をする。
+    """
+    found = shutil.which(config.claude_command)
+    if found:
+        return found
+
+    # PATHで見つからない場合の既定のインストール先。
+    candidates = [
+        Path.home() / ".local" / "bin" / "claude.exe",
+        Path.home() / ".local" / "bin" / "claude",
+        Path.home() / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            log.warn(
+                f"`{config.claude_command}` はPATHに無いため {candidate} を使います。"
+                " スタートアップ起動でも確実にするには、.env の"
+                " CROCO_CLAUDE_COMMAND にこのパスを設定してください。"
+            )
+            return str(candidate)
+    return None
+
+
 def _launch_claude(config: Config, prompt: str) -> int:
     """クロコを非対話モードで起動する。
 
@@ -171,11 +288,11 @@ def _launch_claude(config: Config, prompt: str) -> int:
     projects_dir: Path = config.projects_dir
     projects_dir.mkdir(parents=True, exist_ok=True)
 
-    executable = shutil.which(config.claude_command)
+    executable = _resolve_claude(config)
     if not executable:
         log.error(
             f"`{config.claude_command}` が見つかりません。"
-            " PATHを確認するか .env の CROCO_CLAUDE_COMMAND を設定してください。"
+            " .env の CROCO_CLAUDE_COMMAND にフルパスを設定してください。"
         )
         return 127
 
@@ -189,21 +306,35 @@ def _launch_claude(config: Config, prompt: str) -> int:
         str(SETTINGS_PATH),
         "--add-dir",
         str(projects_dir),
+        # 既定の text 形式は完了までバッファされるため、実行中は画面に何も出ない。
+        # 無人実行とはいえ本人が横目で様子を見る前提なので、
+        # 逐次イベントが流れる stream-json を使って進行を可視化する。
+        "--output-format",
+        "stream-json",
+        "--verbose",
     ]
 
     log.log(f"クロコを起動します（作業ディレクトリ: {projects_dir}）")
-    process = subprocess.run(
+    log.log("--- ここからクロコの出力 ---")
+
+    # 出力を貯め込まずに1行ずつ流す。
+    # 実装中は本人が動画を見ながら横目で進捗を眺める想定なので、
+    # 終わるまで何も表示されないと様子が分からず、止め時も判断できない。
+    process = subprocess.Popen(
         command,
         cwd=str(projects_dir),
         text=True,
         encoding="utf-8",
         errors="replace",
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
     )
+    assert process.stdout is not None
+    for line in process.stdout:
+        for rendered in _render_event(line):
+            log.log(rendered)
+    process.wait()
 
-    if process.stdout:
-        log.log("--- クロコの出力 ---\n" + process.stdout.strip())
-    if process.stderr.strip():
-        log.warn("--- クロコのエラー出力 ---\n" + process.stderr.strip())
-
+    log.log(f"--- クロコの出力ここまで (exit={process.returncode}) ---")
     return process.returncode

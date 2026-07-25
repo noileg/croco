@@ -1,7 +1,11 @@
 @echo off
-rem クロコの起動用ランチャ。
-rem スタートアップにはこのファイルへのショートカットを置く（install_startup.ps1 参照）。
-rem %~dp0 で自分の場所から相対的に解決するので、フォルダを移動しても動く。
+rem Launcher for croco. Put a shortcut to THIS file in the Startup folder
+rem (see install_startup.ps1).
+rem
+rem NOTE: keep this file ASCII-only. cmd.exe re-reads a .bat file using the
+rem active codepage, so mixing non-ASCII text with "chcp 65001" shifts byte
+rem offsets and corrupts parsing of every line that follows. All Japanese
+rem output is produced by Python instead (PYTHONUTF8=1).
 
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
@@ -14,8 +18,8 @@ set EXITCODE=%ERRORLEVEL%
 
 if not "%EXITCODE%"=="0" (
     echo.
-    echo クロコが異常終了しました ^(exit=%EXITCODE%^)。
-    echo ログ: "%~dp0..\logs"
+    echo croco exited with code %EXITCODE%. See the log:
+    echo   "%~dp0..\logs"
     echo.
     pause
 )

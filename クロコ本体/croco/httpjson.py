@@ -94,6 +94,38 @@ def _sleep_for_attempt(attempt: int, retry_after: str | None) -> None:
     time.sleep(delay)
 
 
+def wait_for_network(
+    hosts: tuple[str, ...] = ("api.notion.com", "generativelanguage.googleapis.com"),
+    *,
+    timeout: float = 120.0,
+) -> bool:
+    """ネットワークが使える状態になるまで待つ。
+
+    PC起動時に走らせる都合上、スクリプトの方が回線の確立より早いことがある。
+    通常のリトライ（数秒）では足りずに、起動のたびに何もせず終わる、
+    という無言の失敗になりかねないため、最初に明示的に待つ。
+    """
+    import socket
+
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while True:
+        for host in hosts:
+            try:
+                with socket.create_connection((host, 443), timeout=5):
+                    return True
+            except OSError:
+                continue
+        if time.monotonic() >= deadline:
+            return False
+        attempt += 1
+        if attempt == 1:
+            from . import log as _log
+
+            _log.log("ネットワークの確立を待っています...")
+        time.sleep(min(2.0 * attempt, 10.0))
+
+
 def request_json(
     url: str,
     *,

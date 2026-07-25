@@ -48,26 +48,71 @@ RESPONSE_SCHEMA = {
                     },
                     "kind": {
                         "type": "string",
-                        "enum": ["アイデア", "予定"],
+                        "enum": ["アイデア", "予定", "資料"],
                         "description": (
-                            "日時が決まった予定の話なら「予定」、それ以外は「アイデア」。"
+                            "日時が決まった予定の話なら「予定」。"
+                            "何かを作る・進めるという行動の話なら「アイデア」。"
+                            "行動ではなく、前提・注意事項・参照先・現状整理など"
+                            "後で読み返すための情報なら「資料」。"
+                            "迷ったら「アイデア」ではなく「資料」に寄せること"
+                            "（「アイデア」は自動で実装に着手される対象になるため）。"
                         ),
                     },
                     "scheduled_date": {
                         "type": "string",
                         "description": (
-                            "kindが「予定」の場合のみ、その予定の日時をISO 8601形式"
-                            "（YYYY-MM-DD または YYYY-MM-DDTHH:MM:SS）で。"
-                            "日時が特定できない場合や「アイデア」の場合は空文字列。"
+                            "日時が特定できる場合のみ、ISO 8601形式で。特定できなければ空文字列。"
+                            "**時刻が原文に明示されていなければ日付のみ（YYYY-MM-DD）とし、"
+                            "勝手に時刻を補わないこと。** 時刻が明示されている場合は"
+                            "日本時間として YYYY-MM-DDTHH:MM:SS+09:00 の形式で書く。"
+                            "期間の場合はここに開始日を入れる。"
+                        ),
+                    },
+                    "scheduled_end": {
+                        "type": "string",
+                        "description": (
+                            "「〜から〜まで」のように期間として示されている場合のみ、"
+                            "その終了日時をscheduled_dateと同じ形式で。"
+                            "単一の日時の場合や期間でない場合は空文字列。"
+                        ),
+                    },
+                    "needs_human": {
+                        "type": "boolean",
+                        "description": (
+                            "本人自身が対応する必要があり、AIに任せてはいけない内容ならtrue。"
+                            "具体的には次のいずれかに当たる場合："
+                            "(1) 本人名義で提出する文書の作成"
+                            "（自己推薦書、志望理由書、活動経過報告書、出願書類、"
+                            "大学のレポート、エントリーシート等。"
+                            "AIが書いたことが問題になり得るもの）。"
+                            "(2) 現実世界の行動が必要なもの"
+                            "（書類の取り寄せ、郵送、窓口手続き、予約、支払い等）。"
+                            "(3) 本人の価値判断・意思決定そのものが中身になるもの。"
+                            "判断に迷う場合はtrueにすること"
+                            "（falseにすると自動で着手されるため、誤りの代償が大きい）。"
                         ),
                     },
                 },
-                "required": ["title", "body", "kind", "scheduled_date"],
+                "required": [
+                    "title",
+                    "body",
+                    "kind",
+                    "scheduled_date",
+                    "scheduled_end",
+                    "needs_human",
+                ],
             },
         }
     },
     "required": ["items"],
 }
+
+# 種別の妥当性判定はスキーマのenumを唯一の情報源にする
+# （2箇所に書くと、片方だけ増やしたときに黙って値が握り潰される）。
+VALID_KINDS = frozenset(
+    RESPONSE_SCHEMA["properties"]["items"]["items"]["properties"]["kind"]["enum"]
+)
+DEFAULT_KIND = "アイデア"
 
 SYSTEM_INSTRUCTION = """\
 あなたは、音声やチャットで書き留められた個人のブレスト生ログを、
@@ -75,6 +120,10 @@ SYSTEM_INSTRUCTION = """\
 
 厳守すること:
 - 話題の切れ目で分割する。それ以外の加工を一切しない。
+- **分割の粒度は「後で1つずつ着手・消化できる単位」に揃える。**
+  やること・タスク・手順が箇条書きで複数並んでいる場合は、
+  **1項目＝1アイテムに分ける**。「やること一覧」のようにまとめてはいけない。
+  逆に、1つの話題を意味もなく細切れにもしない。
 - body は生ログの原文を**逐語でそのまま**転記する。要約・言い換え・整形・省略・補完はしない。
   言い淀み、口語、繰り返しもそのまま残す。原文に無い語を足さない。
 - 分割の結果、全アイテムの body を連結すると元の生ログとほぼ一致する状態を保つ。
@@ -174,8 +223,11 @@ def _parse_items(response: dict) -> list[dict]:
             {
                 "title": (item.get("title") or "").strip() or body[:30],
                 "body": item.get("body", ""),
-                "kind": item.get("kind") if item.get("kind") in ("アイデア", "予定") else "アイデア",
+                "kind": item.get("kind") if item.get("kind") in VALID_KINDS else DEFAULT_KIND,
                 "scheduled_date": (item.get("scheduled_date") or "").strip(),
+                "scheduled_end": (item.get("scheduled_end") or "").strip(),
+                # 値が欠けていた場合は安全側（本人対応が必要）に倒す。
+                "needs_human": bool(item.get("needs_human", True)),
             }
         )
     return valid
