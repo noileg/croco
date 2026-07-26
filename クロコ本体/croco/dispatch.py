@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .config import CROCO_HOME, Config
-from . import inbox, log, usage
+from . import inbox, log, screen, usage
 from . import notion as nt
 
 try:
@@ -591,18 +591,43 @@ def open_editor(config: Config, item: inbox.InboxItem) -> None:
     クロコはCLIなので文章を書く場所にならない。書くのは本人・相談相手がクロコ、
     という分担なので、書く場所を人手で探させないために先に出しておく。
     見つからなければ黙って何もしない（無いと困るものではない）。
+
+    開くのは `.md` の関連付けと同じネイティブのエディタ（`croco/editor_app.py`）。
+    **入口を1つに揃えておく**。別々にすると下書きの置き場が二重になる。
     """
     if item.hold_reason != inbox.HOLD_DOCUMENT:
         return
-    path = config.editor_path
-    if not path or not path.is_file():
-        return
     try:
-        os.startfile(str(path))  # 既定のブラウザで開く（Windows）
+        launch_editor()
     except Exception as exc:
         log.warn(f"下書きエディタを開けませんでした: {exc}")
         return
-    log.log(f"下書きエディタを開きました（{path.name}）")
+    log.log("下書きエディタを開きました")
+
+
+def launch_editor(target: Path | None = None) -> None:
+    """下書きエディタを別プロセスとして切り離して開く。
+
+    run_croco.py はこの後クロコを起動して先へ進むので、親が終わっても
+    エディタは残っていてほしい。コンソールを出さないため pythonw を使う。
+    """
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    if not pythonw.exists():
+        pythonw = Path(sys.executable)
+    command = [str(pythonw), "-m", "croco.editor_app"]
+    if target is not None:
+        command.append(str(target))
+    creation = 0
+    if os.name == "nt":
+        creation = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(
+        command,
+        cwd=str(CROCO_HOME),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creation,
+    )
 
 
 def launch_claude(config: Config, prompt: str) -> int:
