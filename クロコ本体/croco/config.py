@@ -188,16 +188,21 @@ class Config:
 
     @property
     def editor_path(self) -> Path | None:
-        """下書きエディタ（ブラウザで開くHTML）の場所。
+        """下書きエディタの起動口（`open_md.pyw`）の場所。
 
         本人が書く文書のときだけ開く。クロコはCLIなので文章を書く場所にならず、
         書くのは本人・相談相手がクロコ、という分担にしているため。
         無ければ開かないだけなので必須ではない。
+
+        **エディタはクロコの一部ではない。** 単体で使える別の道具なので、
+        別リポジトリ（Twitter-like-char-counter）に置いてパスで呼ぶ。
+        クロコの中に置くと、直すたびに2箇所へ同じ修正を当てることになる。
         """
         value = self._env.get("CROCO_EDITOR_PATH")
         if value:
             return Path(value)
-        return CROCO_HOME.parent.parent / "プログラミング関係" / "Twitter-like-char-counter.html"
+        return (CROCO_HOME.parent.parent / "プログラミング関係"
+                / "Twitter-like-char-counter" / "open_md.pyw")
 
     @property
     def log_dir(self) -> Path:

@@ -466,10 +466,10 @@ check("既定の相談猶予", cfg.consult_timeout, 20.0)
 # 長いと全処理が終わったあとに毎回その分だけ待たされる。
 check("相談の猶予は着手より短い", cfg.consult_timeout < cfg.pick_timeout, True)
 check("相談猶予0で聞かなくなる", Config({"CROCO_CONSULT_TIMEOUT": "0"}).consult_timeout, 0.0)
-check("エディタの既定パス", cfg.editor_path.name, "Twitter-like-char-counter.html")
 
 class _FakeEditorConfig:
-    editor_path = Path(__file__)  # 実在すればよい。中身は見ない
+    """エディタの起動口として実在するファイルを指す。中身は見ない。"""
+    editor_path = Path(__file__)
 
 
 def open_editor_with(reason=inbox.HOLD_DOCUMENT):
@@ -485,91 +485,30 @@ def open_editor_with(reason=inbox.HOLD_DOCUMENT):
 
 
 _spawned = open_editor_with()[0]
-# コンソールを出さないPythonで、ネイティブのエディタを起動すること
+# コンソールを出さないPythonで、設定されたエディタを起動すること
 check("pythonwで起動する", Path(_spawned[0]).name.lower(), "pythonw.exe")
-check("ネイティブのエディタを起動する", _spawned[1:], ["-m", "croco.editor_app"])
-
-# --- ターミナルと同じ画面に出す -------------------------------------------
-from croco import screen as _screen  # noqa: E402
-
-_terminal = _screen.terminal_window()
-check("ターミナルのウィンドウを掴める", bool(_terminal), True)
-# IsWindowVisible はサイズ0の裏方ウィンドウにも真を返す。それを掴むと
-# 幅0の位置指定を出してしまうので、大きさで弾けていること
-check("無いウィンドウは大きさを返さない", _screen.window_size(0), None)
-check("掴んだのは人が見ている大きさ", _screen.window_size(_terminal) is not None, True)
-_rect = _screen.editor_rect()
-check("エディタの位置が決まる", _rect is not None, True)
-if _rect:
-    check("つぶれた大きさを渡さない", _rect[2] >= 200 and _rect[3] >= 100, True)
-    # ターミナルと同じ大きさ（画面いっぱいだと書く場所として大きすぎる）
-    check("ターミナルと同じ大きさ", (_rect[2], _rect[3]),
-          _screen.window_size(_terminal))
-    # ここが本題。二画面なので、ターミナルと違う画面に出ると気づけない
-    _work = _screen.monitor_work_area(_terminal)
-    check("ターミナルと同じ画面に収まる",
-          (_work[0] <= _rect[0] and _rect[0] + _rect[2] <= _work[2]
-           and _work[1] <= _rect[1] and _rect[1] + _rect[3] <= _work[3]),
-          True)
+check("設定されたエディタを起動する", _spawned[1:], [str(Path(__file__))])
 check("本人名義の文書でなければ開かない",
       open_editor_with(inbox.HOLD_CROCO), [])
+# エディタはクロコの一部ではない。別リポジトリの起動口をパスで呼ぶ
+check("エディタの既定パスは別リポジトリの起動口",
+      (cfg.editor_path.name, cfg.editor_path.parent.name),
+      ("open_md.pyw", "Twitter-like-char-counter"))
+# 起動口が無ければ黙って何もしない（無いと困るものではない）
 
-# --- 文字数の数え方（HTML版からの移植が崩れていないか）-----------------------
-# **ここが変わると道具の意味が変わる。** 書き直しではなく移植であることの担保。
-from croco import editor_app as _ea  # noqa: E402
 
-for _text, _strip, _ws, _want in [
-    ("あいう", False, True, 3),
-    ("# 見出し", True, True, 3),          # 「# 」は記法なので数えない
-    ("# 見出し", False, True, 5),
-    ("a b", False, False, 2),             # 空白を数えない
-    ("**太字**", True, True, 2),
-    ("[表示](http://例)", True, True, 2),  # 表示文字だけ数える
-    ("![画像](http://例)", True, True, 0),  # 画像は丸ごと落とす
-    ("- 箇条書き", True, True, 4),
-    ("> 引用", True, True, 2),
-    # 表は区切り行を丸ごと、本体行は | だけ落とす（空白は数えない設定で見る）
-    ("| a | b |\n|---|---|\n| 1 | 2 |", True, False, 4),
-]:
-    check(f"数え方 {_text!r} strip={_strip} ws={_ws}",
-          _ea.analyze(_text, 800, _strip, _ws)[0], _want)
+class _MissingEditorConfig:
+    editor_path = Path(__file__).parent / "存在しないエディタ.pyw"
 
-# JSの \w はASCIIのみ。Python既定の \w だと日本語が単語文字になり判定が変わる
-check("日本語の隣の * も記法として落とす",
-      _ea.analyze("あ*い*う", 800, True, True)[0], 3)
-# 上限を超え始める位置（超過分の着色に使う）
-check("超過の開始位置", _ea.analyze("あいうえお", 3, False, True)[1], 3)
-check("上限内なら末尾まで", _ea.analyze("あいう", 800, False, True)[1], 3)
 
-# プレビューの表は桁を揃える。日本語は半角2つ分
-check("日本語の表示幅", _ea._display_width("あいうAB"), 8)
-check("表のセルから装飾を落とす", _ea._split_row("| **名前** | 値 |"), ["名前", "値"])
-# 表は**全行の幅が揃っていること**が要件。区切り線だけ長い、が最初の失敗だった
-_rows = [["項目", "状態"], ["読み込み", "済"], ["a", ""]]
-_widths = [max(_ea._display_width(r[i]) for r in _rows) for i in (0, 1)]
-_lines = _ea.table_lines(_rows, _widths, _ea._display_width)
-check("表の行数（見出し＋区切り＋本体）", len(_lines), 4)
-check("表の全行が同じ幅",
-      len({_ea._display_width(line) for line in _lines}), 1)
-# 曖昧幅の罫線を使うと、数えた幅と描かれる幅が食い違う
-check("罫線にASCIIを使う",
-      any(c in "".join(_lines) for c in "─│┼"), False)
-
-# --- `.md` の関連付け --------------------------------------------------------
-import setup_md_association as _assoc  # noqa: E402
-
-# ランチャは pythonw で起動すること。python.exe だと黒い窓が一瞬光る
-check("コンソールを出さないPythonで起動する",
-      Path(_assoc.pythonw()).name.lower(), "pythonw.exe")
-check("ランチャが実在する", _assoc.launcher().is_file(), True)
-_command = _assoc.open_command()
-# パスに空白も日本語も入るので、引用符が要る
-check("引数を引用符で囲む", _command.count('"'), 6)
-check("ファイル名を渡す", _command.endswith('"%1"'), True)
-# pythonw は例外を表に出さない。**構文エラーは黙って何も起きない**ので、
-# 起動できる形になっていることだけは毎回確かめる
-compile(_assoc.launcher().read_text(encoding="utf-8"), "open_md.pyw", "exec")
-check("ランチャが構文として通る", True, True)
+_missing = []
+_saved_popen = _dispatch.subprocess.Popen
+_dispatch.subprocess.Popen = lambda cmd, **kw: _missing.append(cmd)
+try:
+    _dispatch.open_editor(_MissingEditorConfig(), review_item("x", inbox.HOLD_DOCUMENT))
+finally:
+    _dispatch.subprocess.Popen = _saved_popen
+check("エディタが無ければ何もしない", _missing, [])
 
 # --- 通知音 -----------------------------------------------------------------
 from croco import notify as _notify  # noqa: E402
