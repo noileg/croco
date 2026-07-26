@@ -197,6 +197,11 @@ python run_croco.py --headless # 対話ではなく非対話でクロコを走�
 `CROCO_NOTIFY` は `run_croco.py` が子プロセスの環境変数として渡すので、
 0 にすればフックも黙る（消し方が2箇所に分かれないようにしてある）。
 
+**ただし `--headless`（`-p`）で走らせている間、この通知は鳴らない。**
+実測すると、非対話では許可待ちになっても `Notification` は飛ばず、
+飛ぶのは `SessionStart` / `UserPromptSubmit` / `Stop` の3つだけだった。
+対話モードで実際に鳴るかは、本物の許可ダイアログが出る場面でしか確かめられない。
+
 `MessageBeep` ではなく `winsound.Beep` でトーンを合成している。
 このPCでは `SystemQuestion` に音が割り当てられておらず**一番重要な合図が無音になる**うえ、
 他の種類は全部同じwavで聞き分けられなかった。`Beep` はサウンド設定に左右されない。
