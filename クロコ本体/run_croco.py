@@ -7,25 +7,41 @@
   2. 実装  : Inbox DB からアイテムを選び、クロコ（Claude Code）を起動。
              1件終わったら上限まで次へ続ける（CROCO_MAX_ITEMS）
   3. 相談  : まとめを出したあと、「要確認」を今ここで話すか聞く（任意・既定は話さない）
+  4. 現状  : 管轄プロジェクトの中身をNotionの1ページに書き出す（スマホから見る用）
 
 使い方:
-    python run_croco.py              # 通常（捕捉 → 実装）
+    python run_croco.py              # 通常（捕捉 → 実装 → 現状）
     python run_croco.py --capture    # 捕捉のみ
     python run_croco.py --dispatch   # 実装のみ
+    python run_croco.py --status     # 現状ページの書き出しのみ
+    python run_croco.py --backlog    # クロコ自身の改修依頼を取り出して表示する
     python run_croco.py --dry-run    # 書き込みを行わず、何をするかだけ表示
     python run_croco.py --headless   # クロコを対話ではなく非対話で走らせる
+
+`--backlog` だけは向きが逆で、Notion→開発側の受け渡し口。
+クロコ本体を直すのはクロコ自身ではないので、隔離された改修依頼を
+本体を開発している側のセッションが読めるように吐き出す（croco/backlog.py）。
 """
 
 from __future__ import annotations
 
 import sys
 
-from croco import capture, consult, dispatch, httpjson, log, notify, report
+from croco import backlog, capture, consult, dispatch, httpjson, log, notify, report
+from croco import status as project_status
 from croco.config import Config, ConfigError, load_env
 from croco.lock import AlreadyRunning, SingleInstance
 
 
 def main(argv: list[str]) -> int:
+    # 単独で走らせる用の口。捕捉も実装もせず、これだけをやって終わる。
+    if "--backlog" in argv:
+        backlog.run(Config(load_env()), all_reasons="--all" in argv)
+        return 0
+    if "--status" in argv:
+        project_status.push(Config(load_env()))
+        return 0
+
     do_capture = "--dispatch" not in argv
     do_dispatch = "--capture" not in argv
 
@@ -75,6 +91,15 @@ def main(argv: list[str]) -> int:
     except AlreadyRunning as exc:
         log.warn(f"{exc} 今回は何もせず終了します。")
         return 0
+
+    # 実装フェーズでファイルが増減した直後に書き出す。
+    # 中身が変わっていなければ何もしないので、毎起動で叩いて構わない。
+    if not config.dry_run:
+        try:
+            project_status.push(config)
+        except Exception as exc:
+            # 見るための窓であって、処理そのものではない。失敗しても止めない。
+            log.warn(f"現状ページの書き出しに失敗しました: {exc}")
 
     # 「要確認」はNotionを見に行かないと気づけないので、最後に必ず画面へ出す。
     # 見た直後が「何を話すべきか」を一番分かっている瞬間なので、続けて相談も誘う。

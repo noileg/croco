@@ -92,12 +92,26 @@ Notion + Gemini + Claude Code による個人用ワークフロー自動化パ�
 ## よく使うコマンド
 
 ```
+python run_croco.py --backlog       # 本体への改修依頼を受け取る（下記。まずこれ）
 python test_offline.py              # APIキー不要の回帰テスト。変更したらまずこれ
 python setup_notion.py --check      # Notion疎通確認
 python run_croco.py --dry-run       # 書き込まず、何をするかだけ表示
 python run_croco.py --capture       # 捕捉フェーズのみ
 python run_croco.py --dispatch      # 実装フェーズのみ
+python run_croco.py --status        # 管轄プロジェクトの現状をNotionへ書き出す
 ```
+
+## クロコ本体を直すために開かれたとき
+
+**`python run_croco.py --backlog` を叩くこと。** スマホから入れたアイデアのうち
+「クロコ自身の改修」に分類されたものは、Notion側の「要確認」に隔離されていて
+**そこで止まっている**（無人実行のクロコは `クロコ本体` を書き換えられないため）。
+このコマンドがそれを、ページID・本文・経緯つきで出す。
+
+直したら `python croco_cli.py done <ページID> "何をしたか"` で閉じる。
+閉じないとNotion側に残り続け、次に開いたときまた出てくる。
+
+出力をファイルに保存しないこと。実体はNotionの側にある。
 
 ## 無人実行の安全策
 

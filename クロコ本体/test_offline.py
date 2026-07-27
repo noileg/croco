@@ -492,8 +492,14 @@ check("本人名義の文書でなければ開かない",
       open_editor_with(inbox.HOLD_CROCO), [])
 # エディタはクロコの一部ではない。別リポジトリの起動口をパスで呼ぶ
 check("エディタの既定パスは別リポジトリの起動口",
-      (cfg.editor_path.name, cfg.editor_path.parent.name),
-      ("open_md.pyw", "Twitter-like-char-counter"))
+      cfg.editor_path.parent.name, "Twitter-like-char-counter")
+# **ファイル名を突き合わせるだけでは足りない。** 実在を見ること。
+# 向こうで改名されると、こちらは無ければ黙って開かないだけなので誰も気づかない
+# （実際 open_md.pyw → open_file.pyw の改名で一度壊れた）。
+# エディタごと入っていない環境ではクロコの問題ではないので、そこは見逃す。
+if cfg.editor_path.parent.is_dir():
+    check(f"エディタの既定パスが実在する（{cfg.editor_path.name}）",
+          cfg.editor_path.is_file(), True)
 # 起動口が無ければ黙って何もしない（無いと困るものではない）
 
 
@@ -688,6 +694,127 @@ built = _dispatch.PROMPT_TEMPLATE.format(
 )
 check("実装プロンプト: 相談済みの但し書きが入る", "相談済み" in built, True)
 check("実装プロンプト: 未展開の差し込みが残っていない", "{" in built.replace("{page_id}", ""), False)
+
+# --- Notion のブロック変換 ---------------------------------------------------
+_long = "あ" * (nt.RICH_TEXT_LIMIT * nt.RICH_TEXT_PARTS + 1)
+check("コードブロック: 短文は1つ", len(nt.code_blocks("abc")), 1)
+check("コードブロック: 言語が入る",
+      nt.code_blocks("abc", language="markdown")[0]["code"]["language"], "markdown")
+check("コードブロック: 上限で分かれる", len(nt.code_blocks(_long)), 2)
+# 1ブロックあたりの rich_text は100要素まで。超えると400が返る
+check("コードブロック: rich_textが100要素を超えない",
+      max(len(b["code"]["rich_text"]) for b in nt.code_blocks(_long)),
+      nt.RICH_TEXT_PARTS)
+check("コードブロック: 空文字でも1つ作る", len(nt.code_blocks("")), 1)
+
+# --- 現状ページ（管轄プロジェクト → Notion） --------------------------------
+from croco import status as _status  # noqa: E402
+
+DRAFT_BODY = "私はこの学類を志望する。これは本人が書いた原稿の本文である。"
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / "クロコ管轄プロジェクト"
+    (root / "面接想定質問リスト").mkdir(parents=True)
+    (root / "下書き" / "書いているファイル").mkdir(parents=True)
+    (root / "__pycache__").mkdir()
+    (root / ".git").mkdir()
+    (root / "面接想定質問リスト" / "README.md").write_text(
+        "# 想定質問\n中身", encoding="utf-8")
+    (root / "面接想定質問リスト" / "回答準備シート.md").write_text(
+        "答えの下書き", encoding="utf-8")
+    (root / "下書き" / "README.md").write_text("下書きの説明", encoding="utf-8")
+    (root / "下書き" / "書いているファイル" / "志願理由書.md").write_text(
+        DRAFT_BODY, encoding="utf-8")
+    (root / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+    (root / ".git" / "config").write_text("x", encoding="utf-8")
+
+    tree, sections, file_count = _status.build(root)
+    names = [name for name, _ in sections]
+
+    check("現状: 生成物のフォルダは出さない", "__pycache__" in tree, False)
+    check("現状: 隠しフォルダは出さない", ".git" in tree, False)
+    check("現状: 除外分はファイル数にも入らない", file_count, 4)
+    check("現状: 下書きの存在はツリーに出す", "志願理由書.md" in tree, True)
+    check("現状: 更新日時が添う", "2" in tree and "(" in tree, True)
+    check("現状: READMEの中身を写す", names, ["面接想定質問リスト/README.md"])
+    check("現状: README以外の中身は写さない",
+          any("回答準備シート" in name for name in names), False)
+
+    # **ここが本丸。** 本人が自分の名義で書いている原稿の本文を外に出さない。
+    blocks = _status.to_blocks(tree, sections, file_count=file_count, digest="d")
+    check("現状: 下書きの本文がブロックに入らない",
+          DRAFT_BODY in json.dumps(blocks, ensure_ascii=False), False)
+    check("現状: 下書き配下は中身を写す対象にしない",
+          _status.is_private(Path("下書き/書いているファイル/志願理由書.md")), True)
+    check("現状: 印がページに埋まる",
+          "内容ID: d" in json.dumps(blocks, ensure_ascii=False), True)
+
+    # 上の「本文が入らない」は、下書きが README でないから通っているだけで、
+    # PRIVATE_DIRS を消しても素通りする。**中身を写す対象を広げたときに
+    # 下書きだけは残り続けるか**を、広げた状態で確かめる。
+    _saved_targets = _status.CONTENT_FILES
+    _status.CONTENT_FILES = ("README.md", "志願理由書.md")
+    try:
+        widened = _status.content_sections(root, _status.collect(root))
+    finally:
+        _status.CONTENT_FILES = _saved_targets
+    check("現状: 対象を広げても下書きの中身は写さない",
+          [name for name, _ in widened], ["面接想定質問リスト/README.md"])
+
+    # 中身が変われば書き直す、変わらなければ書き直さない
+    before = _status.signature(tree, sections)
+    check("現状: 同じ内容なら印が変わらない",
+          _status.signature(*_status.build(root)[:2]), before)
+    (root / "面接想定質問リスト" / "README.md").write_text(
+        "# 想定質問\n中身を直した", encoding="utf-8")
+    check("現状: 中身が変われば印も変わる",
+          _status.signature(*_status.build(root)[:2]) != before, True)
+
+check("現状: 大きさの表示", _status.human_size(2048), "2.0KB")
+
+# --- 改修依頼の受け渡し（Notion → 開発側） ----------------------------------
+from croco import backlog as _backlog  # noqa: E402
+
+
+def backlog_item(title, reason, status=inbox.STATUS_REVIEW):
+    return inbox.InboxItem({
+        "id": f"id-{title}",
+        "created_time": "2026-07-20T09:12:00.000Z",
+        "properties": {
+            inbox.P_TITLE: {"title": [{"plain_text": title}]},
+            inbox.P_STATUS: {"select": {"name": status}},
+            inbox.P_HOLD_REASON: {"select": {"name": reason}},
+            inbox.P_RESULT: {"rich_text": [{"plain_text": "[07-20] 隔離した"}]},
+        },
+    })
+
+
+_all = [
+    backlog_item("dispatchを直して", inbox.HOLD_CROCO),
+    backlog_item("自己推薦書を書く", inbox.HOLD_DOCUMENT),
+    backlog_item("願書を取り寄せる", inbox.HOLD_REAL_WORLD),
+    backlog_item("済んだ改修", inbox.HOLD_CROCO, inbox.STATUS_DONE),
+]
+check("改修依頼: クロコ自身の改修だけを渡す",
+      [i.title for i in _backlog.select(_all, all_reasons=False)],
+      ["dispatchを直して"])
+check("改修依頼: 済んだものは渡さない",
+      any(i.title == "済んだ改修"
+          for i in _backlog.select(_all, all_reasons=True)), False)
+check("改修依頼: --all なら他の保留理由も渡す",
+      len(_backlog.select(_all, all_reasons=True)), 3)
+
+_text = _backlog.format_items(
+    _backlog.select(_all, all_reasons=False), {"id-dispatchを直して": "実装の本文"})
+# ページIDが無いと、読んだ側が直しても書き戻せない
+check("改修依頼: ページIDを添える", "id-dispatchを直して" in _text, True)
+check("改修依頼: 本文を添える", "実装の本文" in _text, True)
+check("改修依頼: 経緯を添える", "隔離した" in _text, True)
+check("改修依頼: 閉じ方を書く", "croco_cli.py done" in _text, True)
+check("改修依頼: 本文が取れなくても落ちない",
+      "（本文なし）" in _backlog.format_items(
+          _backlog.select(_all, all_reasons=False), {}), True)
+check("改修依頼: 0件のときは空でない一文",
+      _backlog.format_items([], {}).strip() != "", True)
 
 # --- 結果 ----------------------------------------------------------------
 if failures:

@@ -114,14 +114,62 @@ cmd.exeはバッチを実行中のコードページで読み直すため、日�
 ## 使い方
 
 ```
-python run_croco.py            # 通常（捕捉 → 実装）
+python run_croco.py            # 通常（捕捉 → 実装 → 現状の書き出し）
 python run_croco.py --capture  # 捕捉のみ
 python run_croco.py --dispatch # 実装のみ
+python run_croco.py --status   # 管轄プロジェクトの現状をNotionへ書き出すだけ
+python run_croco.py --backlog  # クロコ自身の改修依頼を取り出す（下記）
 python run_croco.py --dry-run  # 書き込まず、何をするかだけ表示
 python run_croco.py --headless # 対話ではなく非対話でクロコを走らせる
 ```
 
 ログは `logs/croco_YYYY-MM-DD.log` に日付ごとに残る。
+
+### クロコ自身の改修依頼を受け取る（`--backlog`）
+
+クロコ本体を直すのはクロコ自身ではない。`クロコ本体` 配下は無人実行のクロコに
+とって書き換え禁止で、これは外さない（自分を縛っている設定がそこにあるため）。
+そのため改修のアイデアは捕捉の時点で `保留理由=クロコ自身の改修` として
+「要確認」に隔離され、**そこで止まったままになる**。
+
+止まったものを開発側に渡すのがこのコマンド。
+
+```
+python run_croco.py --backlog        # クロコ自身の改修だけ
+python run_croco.py --backlog --all  # 他の保留理由も含めて全部
+```
+
+**クロコ本体を直すために Claude Code を開いたら、まずこれを叩く。**
+ページID・本文（逐語）・これまでの経緯が出るので、そのまま着手できる。
+直したら次で閉じる。
+
+```
+python croco_cli.py done <ページID> "何をしたか"
+```
+
+出力はファイルに書かない。置くと公開リポジトリに載るうえ、Notion側とすぐズレる。
+必要になった瞬間に取りに行けばよい。
+
+### 管轄プロジェクトの現状をNotionで見る（`--status`）
+
+スマホから「クロコが今どこまで作ったか」を見るための1ページ。
+起動のたびに書き直す（**中身が変わっていない回は書き直さない**ので、
+Notion側の「最終更新」は実際に何か動いた時刻を指す）。
+
+初回だけページを作る:
+
+```
+python setup_notion.py --status-page   # 出てきたIDを .env に貼る
+```
+
+載るのは次の2つまで。**ミラーではない。**
+
+- 全ファイルのツリー（名前・大きさ・更新日時）
+- 各プロジェクトの `README.md` の中身
+
+`下書き/` 配下は**ツリーには出るが中身は載らない**。本人が自分の名義で
+書いている原稿で、ローカルにしか置かない線引きをしているもの
+（gitからも外してある）。進み具合が分かるよう更新日時だけは見えるようにしてある。
 
 ### 実装フェーズの動き
 
@@ -345,6 +393,8 @@ cd tmpcheck && claude doctor
     capture.py          捕捉フェーズ
     dispatch.py         実装フェーズ
     consult.py          相談フェーズ（「要確認」を話して着手キューに戻す）
+    backlog.py          クロコ自身の改修依頼を開発側へ渡す（Notion → PC）
+    status.py           管轄プロジェクトの現状をNotionに書き出す（PC → Notion）
     notify.py           節目の通知音
     usage.py            使ったトークンの集計
     report.py           終了時のまとめ表示

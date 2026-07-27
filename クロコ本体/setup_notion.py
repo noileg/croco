@@ -10,7 +10,8 @@
 
 使い方:
     python setup_notion.py <親ページのID または URL>
-    python setup_notion.py --check      # 既存の設定で疎通確認だけする
+    python setup_notion.py --check         # 既存の設定で疎通確認だけする
+    python setup_notion.py --status-page   # 「管轄プロジェクトの現状」ページを足す
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from croco.config import Config, ConfigError
 UNPROCESSED_TITLE = "未処理置き場"
 PROCESSED_TITLE = "処理済み置き場"
 INBOX_TITLE = "クロコ Inbox"
+STATUS_TITLE = "管轄プロジェクトの現状"
 
 
 def extract_page_id(value: str) -> str:
@@ -135,6 +137,40 @@ def setup(config: Config, parent_page_id: str) -> int:
     return 0
 
 
+def add_status_page(config: Config) -> int:
+    """「管轄プロジェクトの現状」ページを、既存の置き場と同じ親の下に作る。
+
+    親ページIDは .env に持っていないが、「未処理置き場」の親を辿れば分かる。
+    初回セットアップで使ったURLを本人が覚えている前提にしない。
+    """
+    client = nt.Notion(config.notion_token, config.notion_version)
+
+    if config.status_page_id:
+        print(f"すでに設定されています: {config.status_page_id}")
+        print("作り直したい場合は .env の NOTION_STATUS_PAGE_ID を消してから再実行してください。")
+        return 0
+
+    parent = client.get_page(config.unprocessed_page_id).get("parent", {})
+    parent_page_id = parent.get("page_id")
+    if not parent_page_id:
+        print(
+            f"「{UNPROCESSED_TITLE}」の親ページを特定できませんでした（parent={parent}）。",
+            file=sys.stderr,
+        )
+        return 1
+
+    page_id = create_child_page(client, parent_page_id, STATUS_TITLE)
+    print(f"[作成] {STATUS_TITLE}: {page_id}")
+    print("\n以下を .env に追記してください:")
+    print(f"NOTION_STATUS_PAGE_ID={page_id}")
+    print(
+        "\n中身はクロコが起動のたびに書き直します"
+        "（変化が無い回は書き直しません）。\n"
+        "手で編集しても次の起動で消えるので、書き込まないこと。"
+    )
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__, file=sys.stderr)
@@ -144,6 +180,8 @@ def main(argv: list[str]) -> int:
 
     if argv[0] == "--check":
         return check(config)
+    if argv[0] == "--status-page":
+        return add_status_page(config)
 
     return setup(config, extract_page_id(argv[0]))
 

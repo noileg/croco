@@ -21,6 +21,12 @@ API_BASE = "https://api.notion.com/v1"
 # Notionのrich_text 1つあたりの文字数上限。超えると400になるので分割して送る。
 RICH_TEXT_LIMIT = 2000
 
+# rich_text 配列の要素数上限。1ブロックに入る文字数はこの積が上限になる。
+RICH_TEXT_PARTS = 100
+
+# 1回の children 追加で送れるブロック数の上限。
+CHILDREN_LIMIT = 100
+
 
 class Notion:
     def __init__(self, token: str, version: str) -> None:
@@ -163,6 +169,27 @@ class Notion:
     def append_blocks(self, page_id: str, children: list) -> dict:
         return self._call("PATCH", f"/blocks/{page_id}/children", {"children": children})
 
+    def get_block_children(self, page_id: str) -> list[dict]:
+        """直下のブロックだけを返す（入れ子は辿らない）。"""
+        return list(self._paginate("GET", f"/blocks/{page_id}/children"))
+
+    def delete_block(self, block_id: str) -> dict:
+        """ブロックを削除する。子ブロックも一緒に消える。"""
+        return self._call("DELETE", f"/blocks/{block_id}")
+
+    def replace_children(self, page_id: str, children: list) -> None:
+        """ページの中身をまるごと入れ替える。
+
+        追記でなく入れ替えなのは、自動更新されるページが際限なく伸びるのを
+        防ぐため。削除はブロック1つにつき1回のAPI呼び出しになるので、
+        **入れ替える側はブロック数を少なく作ること**（status.py がコードブロックに
+        まとめているのはこのため。1行1段落で作ると数百回叩くことになる）。
+        """
+        for block in self.get_block_children(page_id):
+            self.delete_block(block["id"])
+        for i in range(0, len(children), CHILDREN_LIMIT):
+            self.append_blocks(page_id, children[i : i + CHILDREN_LIMIT])
+
 
 # --- 変換ヘルパ ---------------------------------------------------------
 
@@ -221,6 +248,29 @@ def paragraph_blocks(text: str) -> list[dict]:
                     "paragraph": {"rich_text": rich_text(line[i : i + RICH_TEXT_LIMIT])},
                 }
             )
+    return blocks
+
+
+def code_blocks(text: str, *, language: str = "plain text") -> list[dict]:
+    """プレーンテキストをコードブロックの配列へ。
+
+    段落と違い、1ブロックに rich_text を100要素まで積めるので
+    最大20万字が1ブロックに収まる。**ブロック数を抑えたいときはこちら。**
+    等幅で表示されるので、ツリーや原文の表示にも都合がよい。
+    """
+    limit = RICH_TEXT_LIMIT * RICH_TEXT_PARTS
+    blocks: list[dict] = []
+    for i in range(0, max(len(text), 1), limit):
+        blocks.append(
+            {
+                "object": "block",
+                "type": "code",
+                "code": {
+                    "rich_text": rich_text(text[i : i + limit]),
+                    "language": language,
+                },
+            }
+        )
     return blocks
 
 

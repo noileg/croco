@@ -125,6 +125,16 @@ class Config:
         """
         return self._env.get("NOTION_INBOX_DATA_SOURCE_ID") or ""
 
+    @property
+    def status_page_id(self) -> str:
+        """「管轄プロジェクトの現状」ページのID。
+
+        クロコが作ったものをスマホから見るための窓（croco/status.py）。
+        **未設定なら書き出さないだけ**なので必須にはしない。
+        `python setup_notion.py --status-page` で作れる。
+        """
+        return self._env.get("NOTION_STATUS_PAGE_ID") or ""
+
     # --- 動作パラメータ -------------------------------------------------
 
     @property
@@ -188,7 +198,7 @@ class Config:
 
     @property
     def editor_path(self) -> Path | None:
-        """下書きエディタの起動口（`open_md.pyw`）の場所。
+        """下書きエディタの起動口（`open_file.pyw`）の場所。
 
         本人が書く文書のときだけ開く。クロコはCLIなので文章を書く場所にならず、
         書くのは本人・相談相手がクロコ、という分担にしているため。
@@ -197,12 +207,17 @@ class Config:
         **エディタはクロコの一部ではない。** 単体で使える別の道具なので、
         別リポジトリ（Twitter-like-char-counter）に置いてパスで呼ぶ。
         クロコの中に置くと、直すたびに2箇所へ同じ修正を当てることになる。
+
+        **代償として、向こうでファイル名が変わるとここが黙って壊れる。**
+        実際 `open_md.pyw` → `open_file.pyw` の改名で一度壊れた（2026-07-27）。
+        無ければ開かないだけの作りなのでエラーも出ず、気づく手がかりが無い。
+        `test_offline.py` が既定パスの実在を確認しているのはこのため。
         """
         value = self._env.get("CROCO_EDITOR_PATH")
         if value:
             return Path(value)
         return (CROCO_HOME.parent.parent / "プログラミング関係"
-                / "Twitter-like-char-counter" / "open_md.pyw")
+                / "Twitter-like-char-counter" / "open_file.pyw")
 
     @property
     def log_dir(self) -> Path:

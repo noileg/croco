@@ -616,11 +616,16 @@ def launch_editor(editor: Path, target: Path | None = None) -> None:
 
     run_croco.py はこの後クロコを起動して先へ進むので、親が終わっても
     エディタは残っていてほしい。コンソールを出さないため pythonw を使う。
+    エディタ側に exe の起動口（croco-editor.exe）もあるので、
+    そちらを指されていたら Python を挟まずそのまま起動する。
     """
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    if not pythonw.exists():
-        pythonw = Path(sys.executable)
-    command = [str(pythonw), str(editor)]
+    if editor.suffix.lower() == ".exe":
+        command = [str(editor)]
+    else:
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        if not pythonw.exists():
+            pythonw = Path(sys.executable)
+        command = [str(pythonw), str(editor)]
     if target is not None:
         command.append(str(target))
     creation = 0
