@@ -65,7 +65,7 @@ def _process_one(
 
     try:
         page = client.get_page(page_id)
-        # Notionが記録した正確な作成日時。これを「発話日時」として使う。
+        # Notionが記録した正確な作成日時。これを「起草日時」として使う。
         captured_at = page.get("created_time", "")
         raw_log = client.get_page_text(page_id)
     except Exception as exc:

@@ -133,14 +133,14 @@ props = inbox.build_properties(
 check("inbox: 予定は対象外で作られる", props[inbox.P_STATUS]["select"]["name"], "対象外")
 check("inbox: 試行回数初期値", props[inbox.P_ATTEMPTS]["number"], 0)
 check("inbox: 予定日", props[inbox.P_SCHEDULED]["date"]["start"], "2026-08-03")
-check("inbox: 発話日時", props[inbox.P_SPOKEN_AT]["date"]["start"], "2026-07-25T10:00:00.000Z")
+check("inbox: 起草日時", props[inbox.P_SPOKEN_AT]["date"]["start"], "2026-07-25T10:00:00.000Z")
 
 idea_props = inbox.build_properties(
     {"title": "案", "body": "x", "kind": "アイデア", "scheduled_date": "2026-08-03"},
     spoken_at=None,
 )
 check("inbox: アイデアでも取れた日付は捨てない", idea_props[inbox.P_SCHEDULED]["date"]["start"], "2026-08-03")
-check("inbox: 発話日時なし", inbox.P_SPOKEN_AT in idea_props, False)
+check("inbox: 起草日時なし", inbox.P_SPOKEN_AT in idea_props, False)
 
 bad_date_props = inbox.build_properties(
     {"title": "案", "body": "x", "kind": "予定", "scheduled_date": "8月3日"},

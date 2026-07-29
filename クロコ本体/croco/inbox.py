@@ -18,7 +18,12 @@ P_TITLE = "タイトル"
 P_KIND = "種別"
 P_SCHEDULED = "予定日"
 P_STATUS = "ステータス"
-P_SPOKEN_AT = "発話日時"
+# 似た名前だが別物（2026-07-27に改名して区別を明確化。旧称は起草日時＝発話日時）。
+# 起草日時＝アイデアが最初に生まれた時刻（「未処理置き場」子ページのcreated_timeを
+#           スクリプトがコピーしたもの）。
+# 作成日時＝このInbox行自体がいつ作られたか（Notionのcreated_time、自動付与。
+#           捕捉フェーズでAPI登録された時刻）。
+P_SPOKEN_AT = "起草日時"
 P_CREATED_AT = "作成日時"
 P_STARTED_AT = "処理開始日時"
 P_FINISHED_AT = "処理日時"
