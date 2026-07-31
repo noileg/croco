@@ -17,9 +17,10 @@ from __future__ import annotations
 import sys
 
 from .config import CROCO_HOME, Config
-from . import inbox, log, notify
+from . import inbox, log, notify, related
 from . import notion as nt
 from .dispatch import launch_claude, open_editor, read_line
+from .gemini import Gemini
 
 # 保留理由ごとに、クロコが踏んではいけない線が違う。
 # 表示用の一行（inbox.HOLD_ACTIONS）は本人向けなので、こちらはクロコ向けに書き分ける。
@@ -79,7 +80,7 @@ PROMPT_TEMPLATE = """\
 
 ## この保留理由についての注意
 {reason_note}
-
+{related_note}
 ## 進め方
 1. 上の内容から、**何が決まっていないから止まっているのか**を具体的に特定する。
 2. 本人に質問する。一度に全部並べず、答えやすい単位で聞く。
@@ -124,8 +125,7 @@ def offer(config: Config, items: list[inbox.InboxItem] | None) -> bool:
     if not review:
         return False
 
-    # 20秒しか待たないので、別ウィンドウを見ていると気づかずに流れる。
-    # 一覧を出す前に鳴らして、画面に目を戻す時間を作る。
+    # それでも時間切れはあるので、一覧を出す前に鳴らして画面に目を戻す時間を作る。
     notify.waiting(config)
 
     log.log("")
@@ -170,6 +170,15 @@ def run(config: Config, item: inbox.InboxItem) -> bool:
         item.hold_reason,
         "保留理由が記録されていません。まず**なぜ本人の判断が要るのか**から確認してください。",
     )
+    gemini = Gemini(
+        config.gemini_api_key,
+        model=config.gemini_model,
+        thinking_level=config.gemini_thinking_level,
+        temperature=config.gemini_temperature,
+    )
+    candidates = related.find_candidates(
+        client, gemini, config, current_id=item.id, current_title=item.title, current_body=body,
+    )
     prompt = PROMPT_TEMPLATE.format(
         page_id=item.id,
         title=item.title,
@@ -177,6 +186,7 @@ def run(config: Config, item: inbox.InboxItem) -> bool:
         body=body,
         progress=item.result_log.strip() or "（ありません）",
         reason_note=reason_note,
+        related_note=related.render_section(candidates, allow_review=True),
         cli_path=CROCO_HOME / "croco_cli.py",
         projects_dir=config.projects_dir,
     )

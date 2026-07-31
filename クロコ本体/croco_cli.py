@@ -2,7 +2,7 @@
 
 無人実行中のクロコは、このコマンド経由でのみ Notion に触る。
 Notion の資格情報をクロコのコンテキストに載せずに済み、
-できる操作も「担当アイテムの進捗更新」だけに限定できる
+できる操作も「担当アイテムの進捗更新」「Inboxの参照」だけに限定できる
 （仕様書2.5章-12：トークンのスコープを絞る方針と同じ発想）。
 
 使い方:
@@ -10,6 +10,8 @@ Notion の資格情報をクロコのコンテキストに載せずに済み、
     python croco_cli.py done   <page_id> "最終的な成果の要約"
     python croco_cli.py review <page_id> "確認してほしいこと"
     python croco_cli.py resume <page_id> "決まったこと"
+    python croco_cli.py list
+    python croco_cli.py show   <page_id>
 """
 
 from __future__ import annotations
@@ -29,6 +31,15 @@ SOUNDS = {
     "review": notify.waiting,     # 聞きたいことがある。本人待ち
 }
 
+# done を拒否するステータス。要確認＝人の判断待ち、対象外＝実装対象外（予定・資料）。
+# 関連アイテムを見せる機能（croco/related.py）を足したことで、クロコが
+# 要確認アイテムのidを知る機会が増えた。プロンプトの指示だけでは破られうるので、
+# ここを最後の砦にする（2026-07-30）。先に resume でキューに戻してから done を打たせる。
+BLOCKED_DONE_STATUSES = {inbox.STATUS_REVIEW, inbox.STATUS_EXCLUDED}
+
+# list/show の本文冒頭に添える抜粋の長さ。要約はしない（逐語の先頭を切るだけ）。
+EXCERPT_LEN = 60
+
 
 def _append_log(client: nt.Notion, page_id: str, message: str) -> str:
     """実行結果に1行追記して、追記後の全文を返す。
@@ -43,7 +54,90 @@ def _append_log(client: nt.Notion, page_id: str, message: str) -> str:
     return f"{existing}\n{entry}".strip() if existing else entry
 
 
+def _cmd_list(client: nt.Notion, config: Config) -> int:
+    """Inbox全件を、本文冒頭つきで一覧する（読み取り専用）。
+
+    タイトルは元々「本文を指す短いラベル」で意味解釈しないものなので、
+    関連判断の材料としては薄い。本文の冒頭（逐語のまま、要約はしない）を
+    添えることで、show を個別に呼ばなくても大まかな中身が分かるようにする。
+    件数が増えると1件ごとにNotionへ本文取得を投げる分だけ遅くなる
+    （この規模ではまだ気にする段階ではないはず）。
+    """
+    data_source_id = config.inbox_data_source_id or client.resolve_data_source_id(
+        config.inbox_database_id
+    )
+    pages = client.query_data_source(data_source_id)
+    items = [inbox.InboxItem(page) for page in pages]
+    if not items:
+        print("Inboxは空です。")
+        return 0
+    items.sort(key=lambda i: i.page.get("created_time", ""))
+    for item in items:
+        reason = (
+            f" [{item.hold_reason}]"
+            if item.hold_reason and item.hold_reason != inbox.HOLD_NONE
+            else ""
+        )
+        excerpt = client.get_page_text(item.id).replace("\n", " ").strip()[:EXCERPT_LEN]
+        print(f"{item.id}\t{item.status}/{item.kind}{reason}\t{item.title}\t{excerpt}")
+    return 0
+
+
+def _cmd_show(client: nt.Notion, page_id: str) -> int:
+    """1件の本文・経緯まで読む（読み取り専用）。"""
+    page = client.get_page(page_id)
+    item = inbox.InboxItem(page)
+    body = client.get_page_text(page_id)
+    reason = (
+        f" / 保留理由: {item.hold_reason}"
+        if item.hold_reason and item.hold_reason != inbox.HOLD_NONE
+        else ""
+    )
+    print(f"タイトル: {item.title}")
+    print(f"種別: {item.kind} / ステータス: {item.status}{reason}")
+    print("--- 本文 ---")
+    print(body or "（本文なし）")
+    if item.result_log.strip():
+        print("--- これまでの経緯 ---")
+        print(item.result_log)
+    return 0
+
+
+def _guard_done(client: nt.Notion, page_id: str) -> bool:
+    """`done`が要確認／対象外のアイテムに向けて呼ばれていないか確認する。
+
+    関連アイテムを見せる機能（croco/related.py）を足したことで、クロコが
+    要確認アイテムのidを知る機会が増えた。プロンプトの指示（着手するな）だけでは
+    破られうるので、ここを最後の砦にする。
+    """
+    page = client.get_page(page_id)
+    status = nt.select_of(page.get("properties", {}).get(inbox.P_STATUS))
+    if status in BLOCKED_DONE_STATUSES:
+        print(
+            f"このアイテムは現在「{status}」のため done にできません。"
+            " 先に resume でキューに戻してから done を呼んでください。",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def main(argv: list[str]) -> int:
+    if not argv:
+        print(__doc__, file=sys.stderr)
+        return 2
+
+    config = Config()
+    client = nt.Notion(config.notion_token, config.notion_version)
+
+    if argv[0] == "list":
+        return _cmd_list(client, config)
+    if argv[0] == "show":
+        if len(argv) < 2:
+            print("page_idが要ります。", file=sys.stderr)
+            return 2
+        return _cmd_show(client, argv[1])
+
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
@@ -54,8 +148,8 @@ def main(argv: list[str]) -> int:
         print("メッセージが空です。", file=sys.stderr)
         return 2
 
-    config = Config()
-    client = nt.Notion(config.notion_token, config.notion_version)
+    if command == "done" and not _guard_done(client, page_id):
+        return 1
 
     updated = _append_log(client, page_id, message)
     properties: dict = {inbox.P_RESULT: {"rich_text": nt.rich_text(updated)}}

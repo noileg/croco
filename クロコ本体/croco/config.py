@@ -238,12 +238,11 @@ class Config:
     def consult_timeout(self) -> float:
         """相談するか聞く猶予（秒）。0以下で「聞かない」。
 
-        着手アイテムを選ぶとき（pick_timeout）より短くしてある。
-        あちらは複数候補があるときだけ出るが、こちらは「要確認」が1件でもあれば出る。
-        つまり**ほぼ毎回の起動で出る**ので、長いとその分だけ毎回待たされる。
-        しかも全処理が終わったあとなので、待っている間は何も進んでいない。
+        「要確認」が1件でもあれば出るので、ほぼ毎回の起動で表示される。
+        以前はpick_timeoutより短い20秒にしていたが、一覧を読んで
+        話すかどうか判断するには短すぎたため2分に延ばした（本人指定）。
         """
-        return float(self._get("CROCO_CONSULT_TIMEOUT", "20") or "20")
+        return float(self._get("CROCO_CONSULT_TIMEOUT", "120") or "120")
 
     @property
     def interactive(self) -> bool:

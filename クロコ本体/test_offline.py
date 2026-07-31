@@ -125,6 +125,33 @@ for bad, label in [
     except RuntimeError:
         pass
 
+# --- 関連アイテム判定（gemini._parse_related） ------------------------------------
+def related_response(ids):
+    return {"candidates": [{"content": {"parts": [{"text": json.dumps({"related_ids": ids})}]}}]}
+
+
+check(
+    "related: 候補集合に無いidは弾く",
+    gemini._parse_related(related_response(["a", "x"]), valid_ids={"a", "b"}),
+    ["a"],
+)
+check("related: candidatesが空なら空", gemini._parse_related({"candidates": []}, valid_ids={"a"}), [])
+check(
+    "related: JSONでない応答は例外にせず空扱い",
+    gemini._parse_related(
+        {"candidates": [{"content": {"parts": [{"text": "not json"}]}}]}, valid_ids={"a"}
+    ),
+    [],
+)
+check(
+    "related: related_idsが配列でなければ空扱い",
+    gemini._parse_related(
+        {"candidates": [{"content": {"parts": [{"text": json.dumps({"related_ids": "a"})}]}}]},
+        valid_ids={"a"},
+    ),
+    [],
+)
+
 # --- Inbox プロパティ構築 ---------------------------------------------------
 props = inbox.build_properties(
     {"title": "予定の件", "body": "x", "kind": "予定", "scheduled_date": "2026-08-03"},
@@ -461,10 +488,11 @@ from croco import consult as _consult  # noqa: E402
 check("相談: 全ての保留理由にクロコ向けの注意がある",
       set(_consult.REASON_NOTES), set(inbox.HOLD_ACTIONS))
 check("相談: 「なし」には注意を持たない", inbox.HOLD_NONE in _consult.REASON_NOTES, False)
-check("既定の相談猶予", cfg.consult_timeout, 20.0)
-# 着手の猶予より短いこと。相談は「要確認」が1件でもあれば毎回出るので、
-# 長いと全処理が終わったあとに毎回その分だけ待たされる。
-check("相談の猶予は着手より短い", cfg.consult_timeout < cfg.pick_timeout, True)
+check("既定の相談猶予", cfg.consult_timeout, 120.0)
+# 以前は「着手の猶予（60秒）より短く」としていたが、一覧を読んで話すかどうか
+# 判断するには20秒では短すぎたため2分に延ばした（2026-07-30、仕様書2.6章-20）。
+# 着手より短いという制約自体を撤回したので、その逆転を確認する。
+check("相談の猶予は着手より長くなった", cfg.consult_timeout > cfg.pick_timeout, True)
 check("相談猶予0で聞かなくなる", Config({"CROCO_CONSULT_TIMEOUT": "0"}).consult_timeout, 0.0)
 
 class _FakeEditorConfig:
@@ -650,7 +678,7 @@ check("フックはクロコを待たせない", _hook.get("async"), True)
 consult_prompt = _consult.PROMPT_TEMPLATE.format(
     page_id="pid", title="自己推薦書", hold_reason=inbox.HOLD_DOCUMENT,
     body="B", progress="P", reason_note=_consult.REASON_NOTES[inbox.HOLD_DOCUMENT],
-    cli_path="C:/cli.py", projects_dir="C:/proj",
+    related_note="", cli_path="C:/cli.py", projects_dir="C:/proj",
 )
 check("相談: resume の呼び方が入っている", "resume pid" in consult_prompt, True)
 check("相談: log と review の呼び方も入っている",
@@ -690,7 +718,7 @@ check("再開: 保留理由が空でも付けない",
 # 実装用プロンプトが組み立てられること（差し込み漏れがあると本番で落ちる）
 built = _dispatch.PROMPT_TEMPLATE.format(
     page_id="pid", title="T", body="B", progress="P",
-    resumed_note=note, projects_dir="C:/proj", cli_path="C:/cli.py",
+    resumed_note=note, related_note="", projects_dir="C:/proj", cli_path="C:/cli.py",
 )
 check("実装プロンプト: 相談済みの但し書きが入る", "相談済み" in built, True)
 check("実装プロンプト: 未展開の差し込みが残っていない", "{" in built.replace("{page_id}", ""), False)
@@ -815,6 +843,203 @@ check("改修依頼: 本文が取れなくても落ちない",
           _backlog.select(_all, all_reasons=False), {}), True)
 check("改修依頼: 0件のときは空でない一文",
       _backlog.format_items([], {}).strip() != "", True)
+
+# --- 関連アイテムの提示（croco/related.py） ---------------------------------------
+from croco import related as _related  # noqa: E402
+
+
+def rel_item(id_, title, status=inbox.STATUS_TODO, reason=inbox.HOLD_NONE):
+    return inbox.InboxItem({
+        "id": id_,
+        "properties": {
+            inbox.P_TITLE: {"title": [{"plain_text": title}]},
+            inbox.P_STATUS: {"select": {"name": status}},
+            inbox.P_KIND: {"select": {"name": "アイデア"}},
+            inbox.P_HOLD_REASON: {"select": {"name": reason}},
+        },
+    })
+
+
+check("related: 候補なしは空文字列", _related.render_section([], allow_review=False), "")
+
+_section_dispatch = _related.render_section(
+    [rel_item("r1", "先週の続き", status=inbox.STATUS_REVIEW, reason=inbox.HOLD_JUDGEMENT)],
+    allow_review=False,
+)
+check("related: dispatchでは要確認に触るなと言う", "着手せず本人に伝えるだけ" in _section_dispatch, True)
+check("related: idが載る", "r1" in _section_dispatch, True)
+
+_section_consult = _related.render_section(
+    [rel_item("r2", "関連メモ", status=inbox.STATUS_REVIEW, reason=inbox.HOLD_JUDGEMENT)],
+    allow_review=True,
+)
+check("related: consultでは要確認でも制限しない", "着手せず本人に伝えるだけ" in _section_consult, False)
+
+
+class _BoomNotion:
+    def resolve_data_source_id(self, database_id):
+        raise RuntimeError("boom")
+
+
+class _BoomConfig:
+    inbox_data_source_id = ""
+    inbox_database_id = "db"
+
+
+_warn_lines = []
+_saved_warn = _log.warn
+_log.warn = _warn_lines.append
+try:
+    _boom_result = _related.find_candidates(
+        _BoomNotion(), object(), _BoomConfig(),
+        current_id="x", current_title="T", current_body="B",
+    )
+finally:
+    _log.warn = _saved_warn
+check("related: Notion側が失敗しても空リストで返す（本体を止めない）", _boom_result, [])
+check("related: 失敗を警告に残す", any("関連アイテム" in line for line in _warn_lines), True)
+
+
+class _FakeGemini:
+    def __init__(self, related_ids):
+        self._related_ids = related_ids
+        self.called_with = None
+
+    def find_related(self, title, body, candidates):
+        self.called_with = (title, body, candidates)
+        return self._related_ids
+
+
+class _CandidatesNotion:
+    def __init__(self, pages, bodies):
+        self._pages = pages
+        self._bodies = bodies
+
+    def resolve_data_source_id(self, database_id):
+        return "ds"
+
+    def query_data_source(self, data_source_id, *, filter_=None, sorts=None):
+        return self._pages
+
+    def get_page_text(self, page_id):
+        return self._bodies.get(page_id, "")
+
+
+class _CandConfig:
+    inbox_data_source_id = "ds"
+    inbox_database_id = "db"
+
+
+def make_page(id_, title, status=inbox.STATUS_TODO, kind="アイデア", reason=inbox.HOLD_NONE,
+              created="2026-07-20T00:00:00.000Z"):
+    return {
+        "id": id_,
+        "created_time": created,
+        "properties": {
+            inbox.P_TITLE: {"title": [{"plain_text": title}]},
+            inbox.P_STATUS: {"select": {"name": status}},
+            inbox.P_KIND: {"select": {"name": kind}},
+            inbox.P_HOLD_REASON: {"select": {"name": reason}},
+        },
+    }
+
+
+_pages2 = [make_page("self", "現在のやつ"), make_page("other", "関連候補")]
+_notion2 = _CandidatesNotion(_pages2, {"self": "本人本文", "other": "関連本文"})
+_fake_gemini = _FakeGemini(["other"])
+_found = _related.find_candidates(
+    _notion2, _fake_gemini, _CandConfig(),
+    current_id="self", current_title="現在のやつ", current_body="本人本文",
+)
+check(
+    "related: 自分自身は候補から除いてGeminiに渡す",
+    all(c["id"] != "self" for c in _fake_gemini.called_with[2]),
+    True,
+)
+check("related: geminiが選んだものだけ返す", [i.id for i in _found], ["other"])
+
+# --- croco_cli: done のガード（要確認・対象外は先にresumeさせる） -------------------------
+class _StatusNotion:
+    def __init__(self, status):
+        self._status = status
+        self.write_called = False
+
+    def get_page(self, page_id):
+        return {"properties": {inbox.P_STATUS: {"select": {"name": self._status}}}}
+
+    def update_page(self, page_id, properties):
+        self.write_called = True
+
+
+def cli_run_status(status, command="done"):
+    fake = _StatusNotion(status)
+    recorder = _Recorder()
+    saved = (_notify.winsound, croco_cli.Config, croco_cli.nt.Notion)
+    _notify.winsound = recorder
+    croco_cli.Config = lambda: Config({"NOTION_TOKEN": "t"})
+    croco_cli.nt.Notion = lambda *a, **kw: fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = croco_cli.main([command, "pid", "メッセージ"])
+    finally:
+        _notify.winsound, croco_cli.Config, croco_cli.nt.Notion = saved
+    return code, fake.write_called
+
+
+check("done: 要確認だと拒否され、書き込まれない", cli_run_status(inbox.STATUS_REVIEW), (1, False))
+check("done: 対象外だと拒否され、書き込まれない", cli_run_status(inbox.STATUS_EXCLUDED), (1, False))
+check("done: 未処理なら通る", cli_run_status(inbox.STATUS_TODO), (0, True))
+check("done: 処理中なら通る", cli_run_status(inbox.STATUS_DOING), (0, True))
+check("log: 要確認でも拒否されない（進捗メモは無害）", cli_run_status(inbox.STATUS_REVIEW, command="log"), (0, True))
+
+# --- croco_cli: list / show（読み取り専用） ---------------------------------------
+class _ListNotion:
+    def __init__(self, pages, bodies):
+        self._pages = pages
+        self._bodies = bodies
+
+    def query_data_source(self, data_source_id, *, filter_=None, sorts=None):
+        return self._pages
+
+    def get_page_text(self, page_id):
+        return self._bodies.get(page_id, "")
+
+    def get_page(self, page_id):
+        return next(p for p in self._pages if p["id"] == page_id)
+
+
+_list_pages = [
+    make_page("id1", "案A"),
+    make_page("id2", "案B", status=inbox.STATUS_REVIEW, reason=inbox.HOLD_JUDGEMENT),
+]
+_list_bodies = {"id1": "これは長い本文で" * 10, "id2": "短い本文"}
+_list_fake = _ListNotion(_list_pages, _list_bodies)
+
+_saved_cli = (croco_cli.Config, croco_cli.nt.Notion)
+croco_cli.Config = lambda: Config({"NOTION_TOKEN": "t", "NOTION_INBOX_DATA_SOURCE_ID": "ds"})
+croco_cli.nt.Notion = lambda *a, **kw: _list_fake
+try:
+    with contextlib.redirect_stdout(io.StringIO()) as _out_list:
+        _code_list = croco_cli.main(["list"])
+    _list_output = _out_list.getvalue()
+    with contextlib.redirect_stdout(io.StringIO()) as _out_show:
+        _code_show = croco_cli.main(["show", "id2"])
+    _show_output = _out_show.getvalue()
+finally:
+    croco_cli.Config, croco_cli.nt.Notion = _saved_cli
+
+check("list: 正常終了", _code_list, 0)
+check("list: 両方のidが載る", ("id1" in _list_output, "id2" in _list_output), (True, True))
+check("list: 保留理由が出る", inbox.HOLD_JUDGEMENT in _list_output, True)
+check(
+    "list: 本文の抜粋が上限内に切られる",
+    all(len(line.split("\t")[-1]) <= croco_cli.EXCERPT_LEN for line in _list_output.strip().splitlines()),
+    True,
+)
+check("show: 正常終了", _code_show, 0)
+check("show: タイトルが出る", "案B" in _show_output, True)
+check("show: 本文全文が出る（切られない）", "短い本文" in _show_output, True)
+check("show: 保留理由が出る", inbox.HOLD_JUDGEMENT in _show_output, True)
 
 # --- 結果 ----------------------------------------------------------------
 if failures:

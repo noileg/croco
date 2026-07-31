@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .config import CROCO_HOME, Config
-from . import inbox, log, usage
+from . import inbox, log, related, usage
 from . import notion as nt
+from .gemini import Gemini
 
 try:
     import msvcrt  # Windows のキー入力（制限時間つきの入力に使う）
@@ -53,7 +54,7 @@ PROMPT_TEMPLATE = """\
 
 ## これまでの進捗
 {progress}
-
+{related_note}
 ## 作業場所
 `{projects_dir}` の下に、このアイデア専用のフォルダを1つ作って作業してください。
 既に対応するフォルダがあればそれを使ってください。
@@ -184,6 +185,12 @@ def run(config: Config, *, exclude: frozenset[str] = frozenset()) -> Outcome:
     試行回数だけが上限まで増えていく。
     """
     client = nt.Notion(config.notion_token, config.notion_version)
+    gemini = Gemini(
+        config.gemini_api_key,
+        model=config.gemini_model,
+        thinking_level=config.gemini_thinking_level,
+        temperature=config.gemini_temperature,
+    )
 
     data_source_id = config.inbox_data_source_id or client.resolve_data_source_id(
         config.inbox_database_id
@@ -236,14 +243,14 @@ def run(config: Config, *, exclude: frozenset[str] = frozenset()) -> Outcome:
 
     if config.dry_run:
         log.log("（dry-run）以下のプロンプトでクロコを起動します:")
-        log.log(_build_prompt(config, item, body))
+        log.log(_build_prompt(config, item, body, client=client, gemini=gemini))
         return Outcome(item.id, True, 0)
 
     _mark_started(client, item)
     # 相談で決着して戻ってきた文書タスクなら、書く場所も一緒に開く。
     open_editor(config, item)
 
-    prompt = _build_prompt(config, item, body)
+    prompt = _build_prompt(config, item, body, client=client, gemini=gemini)
     started_at = time.time()
     try:
         exit_code = launch_claude(config, prompt)
@@ -316,14 +323,25 @@ def _mark_started(client: nt.Notion, item: inbox.InboxItem) -> None:
     client.update_page(item.id, properties)
 
 
-def _build_prompt(config: Config, item: inbox.InboxItem, body: str) -> str:
+def _build_prompt(
+    config: Config, item: inbox.InboxItem, body: str, *, client: nt.Notion, gemini: Gemini
+) -> str:
     progress = item.result_log.strip() or "（まだありません。今回が初回です）"
+    candidates = related.find_candidates(
+        client,
+        gemini,
+        config,
+        current_id=item.id,
+        current_title=item.title,
+        current_body=body,
+    )
     return PROMPT_TEMPLATE.format(
         page_id=item.id,
         title=item.title,
         body=body,
         progress=progress,
         resumed_note=_resumed_note(item),
+        related_note=related.render_section(candidates, allow_review=False),
         projects_dir=config.projects_dir,
         cli_path=CROCO_HOME / "croco_cli.py",
     )

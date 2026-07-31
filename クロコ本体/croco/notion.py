@@ -19,6 +19,10 @@ from . import httpjson
 API_BASE = "https://api.notion.com/v1"
 
 # Notionのrich_text 1つあたりの文字数上限。超えると400になるので分割して送る。
+# **この「文字数」はUTF-16コードユニット数で数えられる（実測）。**
+# Pythonのlen()はコードポイント数なので、絵文字などBMP外の文字が混じると
+# 数え方がずれる（🔴 は len()では1、Notionでは2）。len()で2000ずつ切ると
+# 「2000字のはずが2002」と言われて400になる。→ _split_utf16() を使うこと。
 RICH_TEXT_LIMIT = 2000
 
 # rich_text 配列の要素数上限。1ブロックに入る文字数はこの積が上限になる。
@@ -222,14 +226,37 @@ def _block_to_lines(block: dict) -> list[str]:
     return [prefix + text]
 
 
+def _split_utf16(value: str, limit: int) -> list[str]:
+    """UTF-16コードユニット数が limit を超えないように切る。
+
+    Notionが数える文字数はUTF-16基準なので、Pythonのスライスで切ると
+    絵文字を含む文字列で上限を超える（RICH_TEXT_LIMIT のコメント参照）。
+    サロゲートペアを割ると文字自体が壊れるので、必ず文字単位で積む。
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for char in value:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if size + width > limit:
+            chunks.append("".join(current))
+            current = []
+            size = 0
+        current.append(char)
+        size += width
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
 def rich_text(value: str) -> list[dict]:
     """文字列を rich_text 配列へ。長い場合は上限ごとに分割する。"""
     if not value:
         return []
-    chunks = [
-        value[i : i + RICH_TEXT_LIMIT] for i in range(0, len(value), RICH_TEXT_LIMIT)
+    return [
+        {"type": "text", "text": {"content": chunk}}
+        for chunk in _split_utf16(value, RICH_TEXT_LIMIT)
     ]
-    return [{"type": "text", "text": {"content": chunk}} for chunk in chunks]
 
 
 def paragraph_blocks(text: str) -> list[dict]:
