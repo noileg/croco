@@ -931,17 +931,18 @@ class _CandConfig:
 
 
 def make_page(id_, title, status=inbox.STATUS_TODO, kind="アイデア", reason=inbox.HOLD_NONE,
-              created="2026-07-20T00:00:00.000Z"):
-    return {
-        "id": id_,
-        "created_time": created,
-        "properties": {
-            inbox.P_TITLE: {"title": [{"plain_text": title}]},
-            inbox.P_STATUS: {"select": {"name": status}},
-            inbox.P_KIND: {"select": {"name": kind}},
-            inbox.P_HOLD_REASON: {"select": {"name": reason}},
-        },
+              created="2026-07-20T00:00:00.000Z", priority="", scheduled=""):
+    props = {
+        inbox.P_TITLE: {"title": [{"plain_text": title}]},
+        inbox.P_STATUS: {"select": {"name": status}},
+        inbox.P_KIND: {"select": {"name": kind}},
+        inbox.P_HOLD_REASON: {"select": {"name": reason}},
     }
+    if priority:
+        props[inbox.P_PRIORITY] = {"select": {"name": priority}}
+    if scheduled:
+        props[inbox.P_SCHEDULED] = {"date": {"start": scheduled}}
+    return {"id": id_, "created_time": created, "properties": props}
 
 
 _pages2 = [make_page("self", "現在のやつ"), make_page("other", "関連候補")]
@@ -958,17 +959,139 @@ check(
 )
 check("related: geminiが選んだものだけ返す", [i.id for i in _found], ["other"])
 
-# --- croco_cli: done のガード（要確認・対象外は先にresumeさせる） -------------------------
+# --- 優先度（croco/inbox.py: priority_rank） -------------------------------------
+check("priority_rank: 高", inbox.priority_rank(inbox.PRIORITY_HIGH), 0)
+check("priority_rank: 中", inbox.priority_rank(inbox.PRIORITY_MID), 1)
+check("priority_rank: 未設定は中と同じ", inbox.priority_rank(""), 1)
+check("priority_rank: 低", inbox.priority_rank(inbox.PRIORITY_LOW), 2)
+check("priority_rank: 未知の値は中扱い", inbox.priority_rank("謎"), 1)
+
+# --- 重複予定判定（gemini._parse_duplicate） ---------------------------------------
+def duplicate_response(dup_id):
+    return {"candidates": [{"content": {"parts": [{"text": json.dumps({"duplicate_id": dup_id})}]}}]}
+
+
+check(
+    "duplicate: 候補集合にあるidを返す",
+    gemini._parse_duplicate(duplicate_response("a"), valid_ids={"a", "b"}),
+    "a",
+)
+check(
+    "duplicate: 候補集合に無いidは空扱い",
+    gemini._parse_duplicate(duplicate_response("x"), valid_ids={"a", "b"}),
+    "",
+)
+check("duplicate: 空文字列はそのまま空", gemini._parse_duplicate(duplicate_response(""), valid_ids={"a"}), "")
+check("duplicate: candidatesが空なら空", gemini._parse_duplicate({"candidates": []}, valid_ids={"a"}), "")
+check(
+    "duplicate: JSONでない応答は例外にせず空扱い",
+    gemini._parse_duplicate(
+        {"candidates": [{"content": {"parts": [{"text": "not json"}]}}]}, valid_ids={"a"}
+    ),
+    "",
+)
+
+# --- 重複予定のマージ（croco/dedupe.py） -------------------------------------------
+from croco import dedupe as _dedupe  # noqa: E402
+
+
+class _DedupeMustNotBeCalled:
+    def query_data_source(self, *a, **kw):
+        failures.append("予定日が空なのに既存アイテムを問い合わせようとした")
+        return []
+
+
+_no_date_result = _dedupe.find_duplicate(
+    _DedupeMustNotBeCalled(), object(), _CandConfig(),
+    data_source_id="ds", title="T", body="B", scheduled_date="",
+)
+check("dedupe: 予定日が無ければ問い合わせずNoneを返す", _no_date_result, None)
+
+
+class _DedupeBoomNotion:
+    def query_data_source(self, *a, **kw):
+        raise RuntimeError("boom")
+
+
+_warn_lines2 = []
+_saved_warn2 = _log.warn
+_log.warn = _warn_lines2.append
+try:
+    _dedupe_boom_result = _dedupe.find_duplicate(
+        _DedupeBoomNotion(), object(), _CandConfig(),
+        data_source_id="ds", title="T", body="B", scheduled_date="2026-08-06",
+    )
+finally:
+    _log.warn = _saved_warn2
+check("dedupe: Notion側が失敗してもNoneで返す（捕捉本体を止めない）", _dedupe_boom_result, None)
+check("dedupe: 失敗を警告に残す", any("重複判定" in line for line in _warn_lines2), True)
+
+_dup_pages = [
+    make_page("d1", "筑波AC入試：web出願登録期間", kind=inbox.KIND_SCHEDULE, scheduled="2026-08-06"),
+    make_page("d2", "無関係な予定", kind=inbox.KIND_SCHEDULE, scheduled="2026-09-01"),
+]
+_dup_notion = _CandidatesNotion(_dup_pages, {"d1": "既存本文", "d2": "別件本文"})
+
+
+class _FakeDedupeGemini:
+    def __init__(self, dup_id):
+        self._dup_id = dup_id
+
+    def find_duplicate_schedule(self, title, body, scheduled_date, candidates):
+        return self._dup_id
+
+
+_dup_found = _dedupe.find_duplicate(
+    _dup_notion, _FakeDedupeGemini("d1"), _CandConfig(),
+    data_source_id="ds", title="筑波AC入試web出願登録期間", body="本文",
+    scheduled_date="2026-08-06",
+)
+check("dedupe: 高確信の判定なら既存アイテムを返す", _dup_found.id if _dup_found else None, "d1")
+
+_dup_none = _dedupe.find_duplicate(
+    _dup_notion, _FakeDedupeGemini(""), _CandConfig(),
+    data_source_id="ds", title="別の予定", body="本文", scheduled_date="2026-10-01",
+)
+check("dedupe: 空文字列ならNone（迷ったら結合しない）", _dup_none, None)
+
+
+class _MergeRecorderNotion:
+    def __init__(self):
+        self.appended = None
+        self.updated = None
+
+    def append_blocks(self, page_id, children):
+        self.appended = (page_id, children)
+
+    def update_page(self, page_id, properties):
+        self.updated = (page_id, properties)
+
+
+_merge_notion = _MergeRecorderNotion()
+_existing_item = inbox.InboxItem(make_page("d1", "既存タイトル", kind=inbox.KIND_SCHEDULE))
+_dedupe.merge_into(_merge_notion, _existing_item, new_title="新タイトル", new_body="新本文です")
+check("dedupe.merge_into: 統合先ページに追記する", _merge_notion.appended[0], "d1")
+_appended_text = "".join(
+    part["text"]["content"]
+    for block in _merge_notion.appended[1]
+    for part in block["paragraph"]["rich_text"]
+)
+check("dedupe.merge_into: 新本文が逐語で含まれる", "新本文です" in _appended_text, True)
+check("dedupe.merge_into: 進捗ログに統合の記録が残る", "統合しました" in str(_merge_notion.updated[1]), True)
+
+# --- croco_cli: done は要確認/対象外からも直接完了できる（2026-08-01簡略化） -------------
 class _StatusNotion:
     def __init__(self, status):
         self._status = status
         self.write_called = False
+        self.written_properties = None
 
     def get_page(self, page_id):
         return {"properties": {inbox.P_STATUS: {"select": {"name": self._status}}}}
 
     def update_page(self, page_id, properties):
         self.write_called = True
+        self.written_properties = properties
 
 
 def cli_run_status(status, command="done"):
@@ -983,14 +1106,28 @@ def cli_run_status(status, command="done"):
             code = croco_cli.main([command, "pid", "メッセージ"])
     finally:
         _notify.winsound, croco_cli.Config, croco_cli.nt.Notion = saved
-    return code, fake.write_called
+    return code, fake.write_called, fake.written_properties
 
 
-check("done: 要確認だと拒否され、書き込まれない", cli_run_status(inbox.STATUS_REVIEW), (1, False))
-check("done: 対象外だと拒否され、書き込まれない", cli_run_status(inbox.STATUS_EXCLUDED), (1, False))
-check("done: 未処理なら通る", cli_run_status(inbox.STATUS_TODO), (0, True))
-check("done: 処理中なら通る", cli_run_status(inbox.STATUS_DOING), (0, True))
-check("log: 要確認でも拒否されない（進捗メモは無害）", cli_run_status(inbox.STATUS_REVIEW, command="log"), (0, True))
+def _result_text(written_properties) -> str:
+    parts = written_properties[inbox.P_RESULT]["rich_text"]
+    return "".join(p["text"]["content"] for p in parts)
+
+
+_r_review = cli_run_status(inbox.STATUS_REVIEW)
+check("done: 要確認でも直接完了する", _r_review[:2], (0, True))
+check("done: 要確認からの完了は注記が残る", "直接完了" in _result_text(_r_review[2]), True)
+
+_r_excluded = cli_run_status(inbox.STATUS_EXCLUDED)
+check("done: 対象外でも直接完了する", _r_excluded[:2], (0, True))
+check("done: 対象外からの完了は注記が残る", "直接完了" in _result_text(_r_excluded[2]), True)
+
+_r_todo = cli_run_status(inbox.STATUS_TODO)
+check("done: 未処理なら通る", _r_todo[:2], (0, True))
+check("done: 未処理からの完了に注記は付かない", "直接完了" in _result_text(_r_todo[2]), False)
+
+check("done: 処理中なら通る", cli_run_status(inbox.STATUS_DOING)[:2], (0, True))
+check("log: 要確認でも拒否されない（進捗メモは無害）", cli_run_status(inbox.STATUS_REVIEW, command="log")[:2], (0, True))
 
 # --- croco_cli: list / show（読み取り専用） ---------------------------------------
 class _ListNotion:
@@ -1040,6 +1177,68 @@ check("show: 正常終了", _code_show, 0)
 check("show: タイトルが出る", "案B" in _show_output, True)
 check("show: 本文全文が出る（切られない）", "短い本文" in _show_output, True)
 check("show: 保留理由が出る", inbox.HOLD_JUDGEMENT in _show_output, True)
+
+# --- croco_cli: list の並び順（優先度→予定日） -------------------------------------
+# 優先度（高→中/未設定→低）が主軸、同一優先度内は予定日が近い順、
+# 予定日が無いものはそのグループの末尾（2026-07-31、本人の指定）。
+_order_pages = [
+    make_page("low", "低優先度", priority=inbox.PRIORITY_LOW, created="2026-07-01T00:00:00.000Z"),
+    make_page("far", "高優先度・遠い日付", priority=inbox.PRIORITY_HIGH, scheduled="2026-12-01"),
+    make_page("near", "高優先度・近い日付", priority=inbox.PRIORITY_HIGH, scheduled="2026-08-01"),
+    make_page("mid_nodate", "未設定・日付なし", created="2026-07-15T00:00:00.000Z"),
+    make_page("mid_dated", "未設定・日付あり", scheduled="2026-09-01"),
+]
+_order_fake = _ListNotion(_order_pages, {p["id"]: "" for p in _order_pages})
+croco_cli.Config = lambda: Config({"NOTION_TOKEN": "t", "NOTION_INBOX_DATA_SOURCE_ID": "ds"})
+croco_cli.nt.Notion = lambda *a, **kw: _order_fake
+try:
+    with contextlib.redirect_stdout(io.StringIO()) as _out_order:
+        croco_cli.main(["list"])
+    _order_output = _out_order.getvalue()
+finally:
+    croco_cli.Config, croco_cli.nt.Notion = _saved_cli
+
+_order_ids = [line.split("\t", 1)[0] for line in _order_output.strip().splitlines()]
+check(
+    "list: 優先度→予定日の順に並ぶ",
+    _order_ids,
+    ["near", "far", "mid_dated", "mid_nodate", "low"],
+)
+check("list: 優先度が表示される", "[高/" in _order_output, True)
+check("list: 予定日が表示される", "予定日:2026-08-01" in _order_output, True)
+
+# --- croco_cli: priority コマンド ---------------------------------------------------
+class _PriorityNotion:
+    def __init__(self):
+        self.updated = None
+
+    def update_page(self, page_id, properties):
+        self.updated = (page_id, properties)
+
+
+def cli_run_priority(args):
+    fake = _PriorityNotion()
+    croco_cli.Config = lambda: Config({"NOTION_TOKEN": "t"})
+    croco_cli.nt.Notion = lambda *a, **kw: fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = croco_cli.main(["priority", *args])
+    finally:
+        croco_cli.Config, croco_cli.nt.Notion = _saved_cli
+    return code, fake.updated
+
+
+check(
+    "priority: 高を設定できる",
+    cli_run_priority(["pid", "高"]),
+    (0, ("pid", {inbox.P_PRIORITY: {"select": {"name": "高"}}})),
+)
+check(
+    "priority: 空文字列で未設定に戻せる",
+    cli_run_priority(["pid", ""]),
+    (0, ("pid", {inbox.P_PRIORITY: {"select": None}})),
+)
+check("priority: 不正な値は拒否され、書き込まれない", cli_run_priority(["pid", "最強"]), (2, None))
 
 # --- 結果 ----------------------------------------------------------------
 if failures:

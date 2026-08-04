@@ -101,6 +101,10 @@ def _show_review(review: list[inbox.InboxItem]) -> None:
     1件ずつ並べると、見るたびに「これは何で止まってるんだっけ」を
     1件ずつ思い出すことになる。理由が同じものは対処も同じなので、
     束ねて「で、何をすればいいのか」を1行付ける方が読む側は安い。
+
+    グループ内の並び順・優先度ラベルは `croco_cli.py list` と同じ基準
+    （`inbox.priority_sort_key` / `inbox.priority_label`）を使う
+    （2026-08-01、当初list専用だったのを本人の指摘で共通化）。
     """
     grouped: dict[str, list[inbox.InboxItem]] = {}
     for item in review:
@@ -114,14 +118,16 @@ def _show_review(review: list[inbox.InboxItem]) -> None:
     order += [r for r in grouped if r not in inbox.HOLD_ACTIONS]
 
     for reason in order:
-        group = grouped[reason]
+        group = sorted(grouped[reason], key=inbox.priority_sort_key)
         action = inbox.HOLD_ACTIONS.get(reason) or (
             UNRECORDED_ACTION if reason == UNRECORDED else ""
         )
         head = f"  【{reason}】{len(group)}件"
         log.log(f"{head} … {action}" if action else head)
         for item in group:
-            log.log(f"    ・{item.title}")
+            tag = inbox.compact_tag(item)
+            tag_block = f"[{tag}] " if tag else ""
+            log.log(f"    ・{tag_block}{item.title}")
             note = _last_log_entry(item.result_log)
             if note:
                 log.log(f"        {note}")

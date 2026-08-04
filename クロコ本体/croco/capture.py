@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from .config import Config
 from .gemini import Gemini
-from . import inbox, log
+from . import dedupe, genre, inbox, log
 from . import notion as nt
 
 
@@ -97,11 +97,40 @@ def _process_one(
     registered = 0
     for item in items:
         try:
-            client.create_page(
-                data_source_id=data_source_id,
-                properties=inbox.build_properties(item, spoken_at=captured_at),
-                children=nt.paragraph_blocks(item["body"]),
-            )
+            duplicate = None
+            if item["kind"] == inbox.KIND_SCHEDULE:
+                duplicate = dedupe.find_duplicate(
+                    client,
+                    gemini,
+                    config,
+                    data_source_id=data_source_id,
+                    title=item["title"],
+                    body=item["body"],
+                    scheduled_date=item.get("scheduled_date", ""),
+                )
+            if duplicate:
+                dedupe.merge_into(
+                    client, duplicate, new_title=item["title"], new_body=item["body"]
+                )
+                log.log(
+                    f"[{label}] 「{item['title']}」は既存の「{duplicate.title}」"
+                    f"({duplicate.id}) と重複と判定し統合しました。"
+                )
+            else:
+                item_genre = genre.assign_for_capture(
+                    client,
+                    gemini,
+                    data_source_id=data_source_id,
+                    title=item["title"],
+                    body=item["body"],
+                )
+                client.create_page(
+                    data_source_id=data_source_id,
+                    properties=inbox.build_properties(
+                        item, spoken_at=captured_at, genre=item_genre
+                    ),
+                    children=nt.paragraph_blocks(item["body"]),
+                )
             registered += 1
         except Exception as exc:
             log.error(

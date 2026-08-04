@@ -6,12 +6,19 @@ Notion の資格情報をクロコのコンテキストに載せずに済み、
 （仕様書2.5章-12：トークンのスコープを絞る方針と同じ発想）。
 
 使い方:
-    python croco_cli.py log    <page_id> "進捗メッセージ"
-    python croco_cli.py done   <page_id> "最終的な成果の要約"
-    python croco_cli.py review <page_id> "確認してほしいこと"
-    python croco_cli.py resume <page_id> "決まったこと"
+    python croco_cli.py log      <page_id> "進捗メッセージ"
+    python croco_cli.py done     <page_id> "最終的な成果の要約"
+    python croco_cli.py review   <page_id> "確認してほしいこと"
+    python croco_cli.py resume   <page_id> "決まったこと"
+    python croco_cli.py priority <page_id> 高|中|低
     python croco_cli.py list
-    python croco_cli.py show   <page_id>
+    python croco_cli.py show     <page_id>
+    python croco_cli.py tree
+    python croco_cli.py read     <page_id>
+
+tree / read は、クロコ用の親ページ配下（Inbox DB以外の子ページも含む）を
+閲覧するための読み取り専用コマンド。list/show と同じ境界の考え方で、
+書き込み系の操作は一切持たない。
 """
 
 from __future__ import annotations
@@ -31,11 +38,14 @@ SOUNDS = {
     "review": notify.waiting,     # 聞きたいことがある。本人待ち
 }
 
-# done を拒否するステータス。要確認＝人の判断待ち、対象外＝実装対象外（予定・資料）。
-# 関連アイテムを見せる機能（croco/related.py）を足したことで、クロコが
-# 要確認アイテムのidを知る機会が増えた。プロンプトの指示だけでは破られうるので、
-# ここを最後の砦にする（2026-07-30）。先に resume でキューに戻してから done を打たせる。
-BLOCKED_DONE_STATUSES = {inbox.STATUS_REVIEW, inbox.STATUS_EXCLUDED}
+# done を要確認／対象外から直接呼んだ場合、resume を経由させず注記だけ添えて完了させる。
+# 当初はここでブロックし、先に resume でキューに戻させていた（2026-07-30、
+# related.pyが要確認アイテムのidを見せるようになったことへの対策）。
+# だが「完了にしてと言っても完了にならない」という2段階の摩擦が実際に起きた
+# （2026-08-01、本人の指摘）。doneは常にメッセージが必須で、それ自体が
+# 「意図して閉じた」証拠になるため、resumeを別コマンドとして強制する安全効果は薄いと
+# 判断し直接完了できるようにした。どの状態から完了したかはログに残す。
+AUTO_RESUME_ON_DONE_STATUSES = {inbox.STATUS_REVIEW, inbox.STATUS_EXCLUDED}
 
 # list/show の本文冒頭に添える抜粋の長さ。要約はしない（逐語の先頭を切るだけ）。
 EXCERPT_LEN = 60
@@ -60,6 +70,11 @@ def _cmd_list(client: nt.Notion, config: Config) -> int:
     タイトルは元々「本文を指す短いラベル」で意味解釈しないものなので、
     関連判断の材料としては薄い。本文の冒頭（逐語のまま、要約はしない）を
     添えることで、show を個別に呼ばなくても大まかな中身が分かるようにする。
+    予定日を出すのは、能動的に「迫っている予定を言及する」仕組みは作らず、
+    見に行けば分かる状態にしておけば十分という判断のため（2026-07-31）。
+    予定日が無い項目は、並び替えのフォールバックに使っている作成日時を
+    代わりに出す（並び順の根拠が画面から見えるように、2026-08-01）。
+    優先度も同じ理由で、未設定でも並び替え上の既定値（中）を明示する。
     件数が増えると1件ごとにNotionへ本文取得を投げる分だけ遅くなる
     （この規模ではまだ気にする段階ではないはず）。
     """
@@ -71,15 +86,25 @@ def _cmd_list(client: nt.Notion, config: Config) -> int:
     if not items:
         print("Inboxは空です。")
         return 0
-    items.sort(key=lambda i: i.page.get("created_time", ""))
+    items.sort(key=inbox.priority_sort_key)
     for item in items:
         reason = (
             f" [{item.hold_reason}]"
             if item.hold_reason and item.hold_reason != inbox.HOLD_NONE
             else ""
         )
+        tag = inbox.compact_tag(item)
+        tag_label = f" [{tag}]" if tag else ""
+        if item.scheduled:
+            date_label = f" 予定日:{item.scheduled}"
+        else:
+            created = item.page.get("created_time", "")
+            date_label = f" 作成日時:{created[:16].replace('T', ' ')}" if created else ""
         excerpt = client.get_page_text(item.id).replace("\n", " ").strip()[:EXCERPT_LEN]
-        print(f"{item.id}\t{item.status}/{item.kind}{reason}\t{item.title}\t{excerpt}")
+        print(
+            f"{item.id}\t{item.status}/{item.kind}{reason}{tag_label}{date_label}"
+            f"\t{item.title}\t{excerpt}"
+        )
     return 0
 
 
@@ -103,23 +128,59 @@ def _cmd_show(client: nt.Notion, page_id: str) -> int:
     return 0
 
 
-def _guard_done(client: nt.Notion, page_id: str) -> bool:
-    """`done`が要確認／対象外のアイテムに向けて呼ばれていないか確認する。
+def _cmd_tree(client: nt.Notion, config: Config) -> int:
+    """クロコ用の親ページ配下を全階層一覧する（読み取り専用）。
 
-    関連アイテムを見せる機能（croco/related.py）を足したことで、クロコが
-    要確認アイテムのidを知る機会が増えた。プロンプトの指示（着手するな）だけでは
-    破られうるので、ここを最後の砦にする。
+    「未処理置き場」の親を辿って親ページIDを得る（setup_notion.py の
+    add_status_page と同じ手。親ページID自体は.envに持っていない）。
     """
+    parent_id = client.get_parent_page_id(config.unprocessed_page_id)
+    if not parent_id:
+        print("親ページを特定できませんでした。", file=sys.stderr)
+        return 1
+    for item in client.list_descendants(parent_id):
+        indent = "  " * item["depth"]
+        mark = "DB" if item["type"] == "database" else "page"
+        print(f"{indent}[{mark}] {item['title']}\t{item['id']}")
+    return 0
+
+
+def _cmd_read(client: nt.Notion, page_id: str) -> int:
+    """任意ページの本文を表示する（Inbox項目に限らない、読み取り専用）。"""
+    page = client.get_page(page_id)
+    body = client.get_page_text(page_id)
+    print(f"タイトル: {nt.page_title(page)}")
+    print("--- 本文 ---")
+    print(body or "（本文なし）")
+    return 0
+
+
+def _done_transition_note(client: nt.Notion, page_id: str) -> str:
+    """`done`が要確認／対象外から直接呼ばれた場合の注記を返す（通常は空文字）。"""
     page = client.get_page(page_id)
     status = nt.select_of(page.get("properties", {}).get(inbox.P_STATUS))
-    if status in BLOCKED_DONE_STATUSES:
+    if status in AUTO_RESUME_ON_DONE_STATUSES:
+        return f"（{status}から直接完了）"
+    return ""
+
+
+def _cmd_priority(client: nt.Notion, page_id: str, value: str) -> int:
+    """優先度を立てる／変える（本人がセッション中に指示したときだけ呼ぶ）。
+
+    Geminiには推定させない方針（2026-07-31）なので、判定は本人の発言のみが
+    根拠になる。空文字列を渡せば未設定（＝中扱い）に戻せる。
+    """
+    if value and value not in inbox.PRIORITIES:
         print(
-            f"このアイテムは現在「{status}」のため done にできません。"
-            " 先に resume でキューに戻してから done を呼んでください。",
+            f"優先度は {'/'.join(inbox.PRIORITIES)} のいずれかで指定してください"
+            "（未設定に戻すなら空文字列）。",
             file=sys.stderr,
         )
-        return False
-    return True
+        return 2
+    prop = {"select": {"name": value}} if value else {"select": None}
+    client.update_page(page_id, {inbox.P_PRIORITY: prop})
+    print(f"優先度を設定しました: {value or '（未設定）'}")
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -137,6 +198,19 @@ def main(argv: list[str]) -> int:
             print("page_idが要ります。", file=sys.stderr)
             return 2
         return _cmd_show(client, argv[1])
+    if argv[0] == "priority":
+        if len(argv) < 2:
+            print("page_idが要ります。", file=sys.stderr)
+            return 2
+        value = argv[2] if len(argv) > 2 else ""
+        return _cmd_priority(client, argv[1], value)
+    if argv[0] == "tree":
+        return _cmd_tree(client, config)
+    if argv[0] == "read":
+        if len(argv) < 2:
+            print("page_idが要ります。", file=sys.stderr)
+            return 2
+        return _cmd_read(client, argv[1])
 
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
@@ -148,8 +222,8 @@ def main(argv: list[str]) -> int:
         print("メッセージが空です。", file=sys.stderr)
         return 2
 
-    if command == "done" and not _guard_done(client, page_id):
-        return 1
+    if command == "done":
+        message += _done_transition_note(client, page_id)
 
     updated = _append_log(client, page_id, message)
     properties: dict = {inbox.P_RESULT: {"rich_text": nt.rich_text(updated)}}

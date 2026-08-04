@@ -91,6 +91,17 @@ class Notion:
             )
         return sources[0]["id"]
 
+    def update_data_source_schema(self, data_source_id: str, properties: dict) -> dict:
+        """データソースのプロパティ定義を追加・更新する。
+
+        既存のプロパティを含めずに追加分だけ渡せばよい（差分適用される）。
+        新規DB作成時の `initial_data_source.properties` と違い、既存DBへの
+        列追加はこちら（`PATCH /data_sources/{id}`）を使う。
+        """
+        return self._call(
+            "PATCH", f"/data_sources/{data_source_id}", {"properties": properties}
+        )
+
     # --- 読み取り -------------------------------------------------------
 
     def get_page(self, page_id: str) -> dict:
@@ -112,6 +123,31 @@ class Notion:
                     }
                 )
         return children
+
+    def get_parent_page_id(self, page_id: str) -> str | None:
+        """指定ページの親ページIDを返す（親がページでない場合は None）。"""
+        parent = self.get_page(page_id).get("parent", {})
+        return parent.get("page_id")
+
+    def list_descendants(self, page_id: str) -> list[dict]:
+        """指定ページ配下の全ページ・DBを再帰的に列挙する（読み取り専用）。
+
+        「未処理置き場」等の直下1階層しか見ない list_child_pages と違い、
+        子ページのそのまた子まで辿る。DBは中身（行）までは展開せず
+        1件として返す（行が見たい場合は query_data_source を使う）。
+        """
+        return list(self._walk_descendants(page_id, depth=0))
+
+    def _walk_descendants(self, page_id: str, *, depth: int) -> Iterator[dict]:
+        for block in self._paginate("GET", f"/blocks/{page_id}/children"):
+            block_type = block.get("type")
+            if block_type == "child_page":
+                title = block.get("child_page", {}).get("title", "")
+                yield {"id": block["id"], "title": title, "type": "page", "depth": depth}
+                yield from self._walk_descendants(block["id"], depth=depth + 1)
+            elif block_type == "child_database":
+                title = block.get("child_database", {}).get("title", "")
+                yield {"id": block["id"], "title": title, "type": "database", "depth": depth}
 
     def get_page_text(self, page_id: str) -> str:
         """ページ本文をプレーンテキストとして取り出す。
@@ -307,6 +343,18 @@ def plain_text_of(prop: dict | None) -> str:
         return ""
     parts = prop.get("title") or prop.get("rich_text") or []
     return "".join(part.get("plain_text", "") for part in parts)
+
+
+def page_title(page: dict) -> str:
+    """ページのタイトルを取り出す。
+
+    通常ページは properties["title"]、DB行はDB側で決めた任意の名前
+    （Inbox DBなら"タイトル"）を使うため、キー名でなく type=="title" で探す。
+    """
+    for prop in (page.get("properties") or {}).values():
+        if prop.get("type") == "title":
+            return plain_text_of(prop)
+    return ""
 
 
 def select_of(prop: dict | None) -> str:

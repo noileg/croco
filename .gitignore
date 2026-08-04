@@ -6,6 +6,7 @@ __pycache__/
 
 # 実行ログ（実行のたびに増える）
 クロコ本体/logs/
+クロコ本体/*_retry.log
 
 # 秘密情報は %USERPROFILE%\.croco\ に置く方針だが、誤って置いた場合の保険
 .env

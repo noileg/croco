@@ -36,6 +36,14 @@ P_TOKENS = "トークン"
 # 見るたびに1件ずつ「これは何で止まってるんだっけ」を思い出す羽目になる。
 # 隔離した側が理由を書き残しておけば、まとめで種類ごとに束ねて出せる。
 P_HOLD_REASON = "保留理由"
+# セッション中に本人が指示したときだけ立つ、任意の優先度（2026-07-31）。
+# Geminiには推定させない。値を誰がどう決めるかは croco_cli.py の priority コマンド側。
+P_PRIORITY = "優先度"
+# アイテムが属するジャンル/プロジェクト（例：「受験」「クロコ本体」）（2026-08-01）。
+# 優先度と違い価値判断ではなく機械的な仕分けなので、種別と同じくGeminiに任せる
+# （croco/genre.py）。自由記述にしているのは、selectだと事前に選択肢を
+# 列挙する必要があり、増えるたびにスキーマ変更が要るため。
+P_GENRE = "ジャンル"
 
 # --- 選択肢 -----------------------------------------------------------
 
@@ -84,6 +92,87 @@ HOLD_ACTIONS: dict[str, str] = {
 
 HOLD_REASONS = frozenset({HOLD_NONE, *HOLD_ACTIONS})
 
+# --- 優先度 -------------------------------------------------------------
+# 種別を問わず（要相談タスク全般に）任意でつけられる3段階（2026-07-31）。
+# 未設定は「中」と同じ扱い：普段は予定日順に流れ、明示的に「高」を
+# つけたものだけが日付に関係なく上に来る（本人の指定）。
+
+PRIORITY_HIGH = "高"
+PRIORITY_MID = "中"
+PRIORITY_LOW = "低"
+PRIORITIES = (PRIORITY_HIGH, PRIORITY_MID, PRIORITY_LOW)
+
+PRIORITY_ORDER: dict[str, int] = {PRIORITY_HIGH: 0, PRIORITY_MID: 1, PRIORITY_LOW: 2}
+
+
+def priority_rank(priority: str) -> int:
+    """並び替え用の重み。未設定・未知の値は「中」扱い。"""
+    return PRIORITY_ORDER.get(priority, PRIORITY_ORDER[PRIORITY_MID])
+
+
+def priority_sort_key(item: "InboxItem") -> tuple:
+    """要相談リストの並び順。
+
+    優先度（高→中/未設定→低）を主軸に、同じ優先度内では予定日が近い順
+    （2026-07-31、本人の指定）。予定日が無いもの（予定以外の種別が大半）は
+    その優先度グループの末尾へ回し、その中は作成順。
+    `croco_cli.py list` 用に作った並び順だが、ランチャー起動時に出す
+    要相談リスト（report.py・consult.py）にも同じ基準を適用する
+    （2026-08-01、当初list専用だったのを本人の指摘で共通化）。
+    """
+    no_schedule = 0 if item.scheduled else 1
+    return (
+        priority_rank(item.priority),
+        no_schedule,
+        item.scheduled or item.page.get("created_time", ""),
+    )
+
+
+def priority_label(item: "InboxItem") -> str:
+    """表示用の優先度ラベル。未設定でも並び替え上の既定値（中）を明示する。"""
+    return item.priority or PRIORITY_MID
+
+
+def elapsed_days(item: "InboxItem") -> int | None:
+    """作成日時（Notionの`created_time`）からの経過日数。取得できなければNone。
+
+    当初は`last_edited_time`（最終更新）を使っていたが、ジャンル一括付与のような
+    メタデータ更新でも書き換わってしまい、中身が何も進んでいないアイテムまで
+    「今日更新」と表示される副作用があった（2026-08-01）。
+    このアーキテクチャは「即処分」が原則（さっさと実装するためのもので、
+    寝かせておく前提が無い）なので、知りたいのは「最後にいつ触ったか」ではなく
+    「いつから存在し続けているか」。作成日時なら触るだけでは動かないので、
+    こちらに変更した（本人の指摘）。
+    """
+    created = item.page.get("created_time", "")
+    if not created:
+        return None
+    try:
+        made = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now().astimezone() - made).days
+
+
+def elapsed_label(item: "InboxItem") -> str:
+    """表示用の経過日数ラベル。取得できなければ空文字。"""
+    days = elapsed_days(item)
+    if days is None:
+        return ""
+    return "今日" if days <= 0 else f"{days}日前"
+
+
+def compact_tag(item: "InboxItem") -> str:
+    """ジャンル・優先度・経過日数を1つの角括弧にまとめた表示用タグ。
+
+    要相談リストが「保留理由」「ジャンル」「優先度」「経過日数」と角括弧4つ
+    並ぶまで詰め込まれ読みにくくなったための整理（2026-08-01、本人の指摘）。
+    保留理由は「対処が保留理由ごとに決まる」別種の情報なので、こちらには含めず
+    呼び出し元で別枠にする。並び順（優先度が主軸、項番22/25）は変えず表記だけ圧縮。
+    """
+    parts = [p for p in (item.genre, priority_label(item), elapsed_label(item)) if p]
+    return "/".join(parts)
+
 # DB作成時に渡すスキーマ定義。
 SCHEMA: dict[str, Any] = {
     P_TITLE: {"title": {}},
@@ -128,6 +217,16 @@ SCHEMA: dict[str, Any] = {
             ]
         }
     },
+    P_PRIORITY: {
+        "select": {
+            "options": [
+                {"name": PRIORITY_HIGH, "color": "red"},
+                {"name": PRIORITY_MID, "color": "yellow"},
+                {"name": PRIORITY_LOW, "color": "gray"},
+            ]
+        }
+    },
+    P_GENRE: {"rich_text": {}},
 }
 
 
@@ -157,7 +256,7 @@ def normalize_date(value: str | None) -> str:
         return ""
 
 
-def build_properties(item: dict, *, spoken_at: str | None) -> dict:
+def build_properties(item: dict, *, spoken_at: str | None, genre: str = "") -> dict:
     """Gemini の出力1件を Notion のプロパティ辞書に変換する。
 
     ステータスは作成時つねに「未処理」固定なのでここでハードコードする
@@ -188,6 +287,8 @@ def build_properties(item: dict, *, spoken_at: str | None) -> dict:
         P_ATTEMPTS: {"number": 0},
         P_HOLD_REASON: {"select": {"name": reason}},
     }
+    if genre:
+        properties[P_GENRE] = {"rich_text": nt.rich_text(genre)}
     if status == STATUS_REVIEW:
         properties[P_RESULT] = {
             "rich_text": nt.rich_text(
@@ -230,6 +331,8 @@ class InboxItem:
         self.scheduled = nt.date_of(props.get(P_SCHEDULED))
         self.result_log = nt.plain_text_of(props.get(P_RESULT))
         self.hold_reason = nt.select_of(props.get(P_HOLD_REASON))
+        self.priority = nt.select_of(props.get(P_PRIORITY))
+        self.genre = nt.plain_text_of(props.get(P_GENRE))
         attempts = props.get(P_ATTEMPTS) or {}
         self.attempts = int(attempts.get("number") or 0)
         tokens = props.get(P_TOKENS) or {}

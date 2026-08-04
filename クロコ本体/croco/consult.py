@@ -124,6 +124,9 @@ def offer(config: Config, items: list[inbox.InboxItem] | None) -> bool:
     review = [item for item in (items or []) if item.status == inbox.STATUS_REVIEW]
     if not review:
         return False
+    # 並び順・優先度ラベルは `croco_cli.py list` と同じ基準
+    # （2026-08-01、当初list専用だったのを本人の指摘で共通化）。
+    review.sort(key=inbox.priority_sort_key)
 
     # それでも時間切れはあるので、一覧を出す前に鳴らして画面に目を戻す時間を作る。
     notify.waiting(config)
@@ -132,7 +135,9 @@ def offer(config: Config, items: list[inbox.InboxItem] | None) -> bool:
     log.log("この中で今ここで話すものはありますか？")
     for index, item in enumerate(review, 1):
         reason = item.hold_reason or "理由の記録なし"
-        log.log(f"  {index:2}) [{reason}] {item.title}")
+        tag = inbox.compact_tag(item)
+        tag_block = f"[{tag}] " if tag else ""
+        log.log(f"  {index:2}) [{reason}] {tag_block}{item.title}")
     log.log(
         f"番号を入れてEnter（{config.consult_timeout:.0f}秒で、何もせず終了）: "
     )

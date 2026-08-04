@@ -31,7 +31,7 @@ Notion + Gemini + Claude Code による個人用ワークフロー自動化パ�
 スマホ(Notion AIチャット) → Notion「未処理置き場」の子ページ
   ↓ PC起動時に run_croco.py
 ① 捕捉  Gemini が話題ごとに分割 → Inbox DB → 「処理済み置き場」へ移動
-② 実装  Inbox DB から1件選び claude -p で無人起動 → 進捗をNotionに書き戻す
+② 実装  Inbox DB から1件選びクロコを起動（既定は対話モード。`CROCO_INTERACTIVE=0` で `-p` の非対話も選べる） → 進捗をNotionに書き戻す
 ```
 
 ## 設計上、絶対に守ること
@@ -81,6 +81,9 @@ Notion + Gemini + Claude Code による個人用ワークフロー自動化パ�
 - ページ移動は `POST /v1/pages/{id}/move`、body は `{"parent":{"type":"page_id","page_id":...}}`。
 - DB作成時のスキーマは `initial_data_source.properties` に入れる。
 - rich_text は1要素2000文字まで。超える場合は分割して送る。
+- ページの「ゴミ箱に移動」は `archived` ではなく **`in_trash`**。`archived: true` を
+  ページ更新のbodyに含めると400（`body.archived should be not present`）で弾かれる
+  （2026-08-01、`NOTION_VERSION=2026-03-11`で確認）。
 
 ### Gemini（`gemini-3.6-flash`）
 - エンドポイント：`POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
@@ -119,12 +122,14 @@ python run_croco.py --status        # 管轄プロジェクトの現状をNotion
 
 ## 無人実行の安全策
 
-`croco_settings.json`（`claude -p --settings` で渡す）の deny リストが最後の砦。
-deny はどのパーミッションモードでも効く。細かい判断は `--permission-mode auto` に任せる。
+`croco_settings.json`（`--settings` で渡す。対話・非対話どちらの起動でも渡している）
+の deny リストが最後の砦。deny はどのパーミッションモードでも効く。
+細かい判断は `--permission-mode auto` に任せる。
 
 **このファイルを編集したら必ず検証すること。**
-`-p`（非対話）モードでは検証に失敗した設定ファイルが*無言で無視される*ため、
-書き間違えると deny リストごと効かなくなる。手順は README 参照。
+`-p`（非対話）モードでは検証に失敗した設定ファイルが*無言で無視される*ことを
+確認済み。対話モード（既定）でも同じことが起きるかは未確認。
+書き間違えると deny リストごと効かなくなるおそれがあるため、手順は README 参照。
 
 ## 進め方
 

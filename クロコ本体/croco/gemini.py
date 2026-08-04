@@ -178,6 +178,113 @@ RELATED_SYSTEM_INSTRUCTION = """\
 - 迷ったら含めない。過剰に拾うと、無関係な文脈が後工程に混ざる。
 """
 
+# 重複予定判定用のスキーマ。「まとめノート」が既に登録済みの予定を
+# 別の言い回しで再掲すると、捕捉フェーズが律儀に二重登録してしまう
+# （実例：2026-07-31、筑波大学AC入試の日程重複）。これを防ぐための狭い判定。
+DUPLICATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "duplicate_id": {
+            "type": "string",
+            "description": (
+                "新しい予定と実質的に同じ予定だと高い確信で判定できた"
+                "既存アイテムのIDを1つだけ返す。予定日が違う、対象が違う、"
+                "似ているが別件の可能性が少しでもあれば空文字列にすること。"
+                "迷ったら空文字列（重複扱いにしない）。該当は最大1件。"
+            ),
+        }
+    },
+    "required": ["duplicate_id"],
+}
+
+DUPLICATE_SYSTEM_INSTRUCTION = """\
+あなたは、新しい「予定」が既存の「予定」群のどれかと同一の予定を指しているかどうかを
+判定するだけの処理系です。
+
+厳守すること:
+- 同一の予定を指しているかどうかだけを判定する。表現の違い・情報量の差は無視してよい。
+- 予定日が異なる、または別件の可能性が少しでもあれば重複と判定しない。
+- 迷ったら重複と判定しない（誤って統合すると後から分離できなくなるため）。
+- 該当が無ければ duplicate_id は空文字列。
+"""
+
+# ジャンル/プロジェクト分類用のスキーマ。優先度と違い価値判断ではなく機械的な
+# 仕分けなので、種別と同じ扱いでGeminiに任せる（2026-08-01、本人の指摘）。
+# 既存ジャンル一覧を毎回渡し、表記ゆれで似た束が増殖しないようにする。
+GENRE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "genre": {
+            "type": "string",
+            "description": (
+                "このアイテムが属するジャンル/プロジェクト名。"
+                "既存ジャンル一覧の中に実質同じものがあれば、必ずその表記をそのまま使う"
+                "（似た意味の別表記で新しい束を作らないこと）。"
+                "無ければ短い新しいジャンル名を作る（数語程度、例：「受験」"
+                "「クロコ本体」）。内容の要約ではなく、束ねるための短いラベル。"
+            ),
+        }
+    },
+    "required": ["genre"],
+}
+
+GENRE_SYSTEM_INSTRUCTION = """\
+あなたは、新しいメモが既存のジャンル/プロジェクトのどれに属するかを判定する、
+または新しいジャンル名を短く付けるだけの処理系です。
+
+厳守すること:
+- 既存ジャンル一覧に実質同じ括りがあれば、その表記をそのまま返す。
+  「受験」と「受験関連」のような表記ゆれで別の束を作らないこと。
+- 既存のどれにも実質同じ括りが無い場合のみ、新しい短いジャンル名を作る。
+- ジャンル名は内容の要約ではなく、複数アイテムを束ねるための短いラベル
+  （プロジェクト名・分野名程度）にする。
+"""
+
+# 棚卸し（backfill）用の一括判定スキーマ。1件ずつAPIを呼ぶと件数分だけ
+# リクエストを消費し、Gemini無料枠の日次上限（実測20件/日、2026-08-01）に
+# 即座に当たる。複数件をまとめて1回のプロンプトで渡し、まとめて分類させる
+# （このモジュール冒頭の「ブレスト1セッション＝API1回」と同じ発想）。
+GENRE_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "assignments": {
+            "type": "array",
+            "description": "渡された全アイテムそれぞれに割り振ったジャンル。",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "対象アイテムのid（渡された値をそのまま返す）。",
+                    },
+                    "genre": {
+                        "type": "string",
+                        "description": (
+                            "このアイテムが属するジャンル/プロジェクト名。"
+                            "既存ジャンル一覧、または他の対象アイテムと実質同じ括りなら"
+                            "同じ表記を使う（表記ゆれで似た束を作らない）。"
+                            "どれにも属さなければ短い新しいジャンル名を作る。"
+                        ),
+                    },
+                },
+                "required": ["id", "genre"],
+            },
+        }
+    },
+    "required": ["assignments"],
+}
+
+GENRE_BATCH_SYSTEM_INSTRUCTION = """\
+あなたは、複数のメモをジャンル/プロジェクト単位に束ねるだけの処理系です。
+
+厳守すること:
+- 全対象アイテムに、渡されたidそのままで1件ずつジャンルを割り振る。抜かさない。
+- 既存ジャンル一覧に実質同じ括りがあれば、その表記をそのまま使う。
+- 既存に無くても、**対象アイテム同士で実質同じ括りなら同じ新しいジャンル名**を使う
+  （表記ゆれで別々の束を作らない）。
+- ジャンル名は内容の要約ではなく、束ねるための短いラベル（プロジェクト名・分野名程度）。
+"""
+
 
 class Gemini:
     def __init__(
@@ -283,6 +390,211 @@ class Gemini:
         )
         valid_ids = {c["id"] for c in candidates}
         return _parse_related(response, valid_ids=valid_ids)
+
+    def find_duplicate_schedule(
+        self, title: str, body: str, scheduled_date: str, candidates: list[dict]
+    ) -> str:
+        """新しい「予定」が既存の「予定」群と重複していないか判定する。
+
+        重複と高確信で判定できた場合のみIDを返す。呼び出し失敗はここでは吸収しない
+        （呼び出し元の dedupe.py が「判定できなければ重複なし」として吸収する）。
+        """
+        if not candidates:
+            return ""
+
+        blocks = []
+        for c in candidates:
+            blocks.append(
+                f"- id: {c['id']}\n"
+                f"  タイトル: {c['title']}\n"
+                f"  予定日: {c['scheduled']}\n"
+                f"  本文: {c['body']}"
+            )
+        prompt = (
+            f"## 新しい予定\nタイトル: {title}\n予定日: {scheduled_date}\n本文: {body}\n\n"
+            "## 既存の「予定」一覧\n" + "\n".join(blocks)
+        )
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": DUPLICATE_SYSTEM_INSTRUCTION}]},
+            "generationConfig": {
+                "temperature": self._temperature,
+                "thinkingConfig": {"thinkingLevel": self._thinking_level},
+                "responseFormat": {
+                    "text": {
+                        "mimeType": "APPLICATION_JSON",
+                        "schema": DUPLICATE_SCHEMA,
+                    }
+                },
+            },
+        }
+
+        response = httpjson.request_json(
+            f"{API_BASE}/models/{self._model}:generateContent",
+            method="POST",
+            headers={"x-goog-api-key": self._api_key},
+            payload=payload,
+        )
+        valid_ids = {c["id"] for c in candidates}
+        return _parse_duplicate(response, valid_ids=valid_ids)
+
+    def assign_genre(self, title: str, body: str, existing_genres: list[str]) -> str:
+        """アイテム1件のジャンル/プロジェクト名を判定する。
+
+        既存ジャンル一覧に実質同じ括りがあればその表記を、無ければ新しい
+        短いラベルを返す。呼び出し失敗はここでは吸収しない（呼び出し元の
+        genre.py が「未分類のまま」として吸収する）。
+        """
+        genres_block = "\n".join(f"- {g}" for g in existing_genres) or "（まだ無い）"
+        prompt = (
+            f"## 既存ジャンル一覧\n{genres_block}\n\n"
+            f"## 新しいアイテム\nタイトル: {title}\n本文: {body}"
+        )
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": GENRE_SYSTEM_INSTRUCTION}]},
+            "generationConfig": {
+                "temperature": self._temperature,
+                "thinkingConfig": {"thinkingLevel": self._thinking_level},
+                "responseFormat": {
+                    "text": {
+                        "mimeType": "APPLICATION_JSON",
+                        "schema": GENRE_SCHEMA,
+                    }
+                },
+            },
+        }
+
+        response = httpjson.request_json(
+            f"{API_BASE}/models/{self._model}:generateContent",
+            method="POST",
+            headers={"x-goog-api-key": self._api_key},
+            payload=payload,
+        )
+        return _parse_genre(response)
+
+    def assign_genres_batch(
+        self, items: list[dict], existing_genres: list[str]
+    ) -> dict[str, str]:
+        """複数アイテムのジャンルを1回のAPI呼び出しでまとめて判定する（棚卸し用）。
+
+        `items` は [{"id":..,"title":..,"body":..}, ...]。件数が多いとプロンプトが
+        長くなる分だけ時間がかかるが、API呼び出し回数は1回で済む（無料枠の
+        日次上限に当たらないようにするため。2026-08-01、429連発への対応）。
+        呼び出し失敗はここでは吸収しない（呼び出し元の genre.py が
+        「未分類のまま」として吸収する）。
+        """
+        if not items:
+            return {}
+
+        genres_block = "\n".join(f"- {g}" for g in existing_genres) or "（まだ無い）"
+        blocks = [
+            f"- id: {i['id']}\n  タイトル: {i['title']}\n  本文: {i['body']}" for i in items
+        ]
+        prompt = (
+            f"## 既存ジャンル一覧\n{genres_block}\n\n"
+            "## 対象アイテム一覧\n" + "\n".join(blocks)
+        )
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": GENRE_BATCH_SYSTEM_INSTRUCTION}]},
+            "generationConfig": {
+                "temperature": self._temperature,
+                "thinkingConfig": {"thinkingLevel": self._thinking_level},
+                "responseFormat": {
+                    "text": {
+                        "mimeType": "APPLICATION_JSON",
+                        "schema": GENRE_BATCH_SCHEMA,
+                    }
+                },
+            },
+        }
+
+        response = httpjson.request_json(
+            f"{API_BASE}/models/{self._model}:generateContent",
+            method="POST",
+            headers={"x-goog-api-key": self._api_key},
+            payload=payload,
+        )
+        valid_ids = {i["id"] for i in items}
+        return _parse_genre_batch(response, valid_ids=valid_ids)
+
+
+def _parse_genre_batch(response: dict, *, valid_ids: set[str]) -> dict[str, str]:
+    """レスポンスから id→genre の対応を取り出す。壊れていれば空辞書。"""
+    candidates = response.get("candidates") or []
+    if not candidates:
+        return {}
+    parts = candidates[0].get("content", {}).get("parts") or []
+    text = "".join(part.get("text", "") for part in parts).strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    assignments = parsed.get("assignments")
+    if not isinstance(assignments, list):
+        return {}
+    result: dict[str, str] = {}
+    for entry in assignments:
+        if not isinstance(entry, dict):
+            continue
+        item_id = entry.get("id")
+        genre = entry.get("genre")
+        if (
+            isinstance(item_id, str)
+            and item_id in valid_ids
+            and isinstance(genre, str)
+            and genre.strip()
+        ):
+            result[item_id] = genre.strip()
+    return result
+
+
+def _parse_genre(response: dict) -> str:
+    """レスポンスから genre を取り出す。壊れていれば空文字列（未分類）。
+
+    _parse_related と同じ理由（補助機能なので例外を投げない）。
+    """
+    candidates = response.get("candidates") or []
+    if not candidates:
+        return ""
+    parts = candidates[0].get("content", {}).get("parts") or []
+    text = "".join(part.get("text", "") for part in parts).strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return ""
+    genre = parsed.get("genre")
+    return genre.strip() if isinstance(genre, str) else ""
+
+
+def _parse_duplicate(response: dict, *, valid_ids: set[str]) -> str:
+    """レスポンスから duplicate_id を取り出す。壊れていれば重複なし扱いにする。
+
+    _parse_related と同じ理由（補助機能なので例外を投げない）。
+    """
+    candidates = response.get("candidates") or []
+    if not candidates:
+        return ""
+    parts = candidates[0].get("content", {}).get("parts") or []
+    text = "".join(part.get("text", "") for part in parts).strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return ""
+    dup_id = parsed.get("duplicate_id")
+    if not isinstance(dup_id, str) or dup_id not in valid_ids:
+        return ""
+    return dup_id
 
 
 def _parse_related(response: dict, *, valid_ids: set[str]) -> list[str]:

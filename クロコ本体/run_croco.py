@@ -15,6 +15,7 @@
     python run_croco.py --dispatch   # 実装のみ
     python run_croco.py --status     # 現状ページの書き出しのみ
     python run_croco.py --backlog    # クロコ自身の改修依頼を取り出して表示する
+    python run_croco.py --genre-backfill  # ジャンル未設定の既存アイテムへ一括で割り振る
     python run_croco.py --dry-run    # 書き込みを行わず、何をするかだけ表示
     python run_croco.py --headless   # クロコを対話ではなく非対話で走らせる
 
@@ -27,9 +28,11 @@ from __future__ import annotations
 
 import sys
 
-from croco import backlog, capture, consult, dispatch, httpjson, log, notify, report
+from croco import backlog, capture, consult, dispatch, genre, httpjson, log, notify, report
+from croco import notion as nt
 from croco import status as project_status
 from croco.config import Config, ConfigError, load_env
+from croco.gemini import Gemini
 from croco.lock import AlreadyRunning, SingleInstance
 
 
@@ -40,6 +43,18 @@ def main(argv: list[str]) -> int:
         return 0
     if "--status" in argv:
         project_status.push(Config(load_env()))
+        return 0
+    if "--genre-backfill" in argv:
+        config = Config(load_env())
+        client = nt.Notion(config.notion_token, config.notion_version)
+        gemini = Gemini(
+            config.gemini_api_key,
+            model=config.gemini_model,
+            thinking_level=config.gemini_thinking_level,
+            temperature=config.gemini_temperature,
+        )
+        count = genre.backfill(client, gemini, config)
+        log.log(f"ジャンル未設定だった {count} 件に割り振りました。")
         return 0
 
     do_capture = "--dispatch" not in argv
