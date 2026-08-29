@@ -23,12 +23,15 @@ Notion→PC の向き（捕捉・実装）しか無く、逆向きが1本も無�
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
 from . import log
 from . import notion as nt
-from .config import Config
+from .config import CROCO_HOME, Config
 
 # 中身まで写すファイル名。増やすならここ。
 CONTENT_FILES = ("README.md",)
@@ -210,3 +213,20 @@ def push(config: Config) -> bool:
     client.replace_children(page_id, blocks)
     log.log(f"現状ページを更新しました（ファイル {file_count}件）。")
     return True
+
+
+def launch_async(config: Config) -> None:
+    """`push()` を、別ウィンドウの別プロセスに切り離して走らせる。
+
+    `replace_children` は既存ブロックを1個ずつDELETEする関係で
+    （notion.py参照）25〜40秒かかる。本体側の以降の処理（まとめ表示・相談）を
+    それだけ待たせたくないので、本体プロセスとは切り離して並行に走らせる。
+    実体は `python run_croco.py --status`（既存の単体コマンドと同じ経路）。
+    """
+    command = [sys.executable, str(CROCO_HOME / "run_croco.py"), "--status"]
+    env = os.environ | {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    creation = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
+    try:
+        subprocess.Popen(command, cwd=str(CROCO_HOME), env=env, creationflags=creation)
+    except OSError as exc:
+        log.warn(f"現状ページの書き出しを別プロセスで起動できませんでした: {exc}")

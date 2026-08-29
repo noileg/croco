@@ -206,6 +206,14 @@ class Notion:
             {"parent": {"type": "page_id", "page_id": new_parent_page_id}},
         )
 
+    def trash_page(self, page_id: str) -> dict:
+        """ページをゴミ箱へ移動する。
+
+        `archived: true` は400で弾かれる（`body.archived should be not present`）。
+        正しくは `in_trash`（2026-08-01確認、CLAUDE.md参照）。
+        """
+        return self._call("PATCH", f"/pages/{page_id}", {"in_trash": True})
+
     def append_blocks(self, page_id: str, children: list) -> dict:
         return self._call("PATCH", f"/blocks/{page_id}/children", {"children": children})
 

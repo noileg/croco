@@ -52,6 +52,39 @@ def run(config: Config, notion: Gemini | None = None) -> int:
     return registered_total
 
 
+def _merge_ideas(items: list[dict]) -> list[dict]:
+    """種別＝アイデアの分割結果を1件に統合する。
+
+    現状の運用では、1つのメモは1つの実装について話している
+    （2026-08-08、本人の指摘）。話題の切れ目で機械的に分割すると、
+    同じ1つの実装に対する複数の要件が別々のInboxアイテムに割れ、
+    実装フェーズが1件ずつバラバラに着手して他の要件の存在に気づけなくなる。
+    予定・資料は性質が違うので混ぜず、対象は種別＝アイデアのみ。
+    """
+    idea_positions = [i for i, item in enumerate(items) if item["kind"] == inbox.KIND_IDEA]
+    if len(idea_positions) <= 1:
+        return items
+
+    ideas = [items[i] for i in idea_positions]
+    merged = dict(ideas[0])
+    merged["body"] = "\n\n".join(idea["body"] for idea in ideas)
+    # 本人対応が要る理由は、どれか1件にでも付いていたら引き継ぐ
+    # （統合のどさくさで「なし」に薄まると自動着手されてしまう）。
+    merged["human_reason"] = next(
+        (idea["human_reason"] for idea in ideas if idea["human_reason"] != inbox.HOLD_NONE),
+        inbox.HOLD_NONE,
+    )
+
+    first_position = idea_positions[0]
+    result = []
+    for i, item in enumerate(items):
+        if item["kind"] != inbox.KIND_IDEA:
+            result.append(item)
+        elif i == first_position:
+            result.append(merged)
+    return result
+
+
 def _process_one(
     client: nt.Notion,
     gemini: Gemini,
@@ -85,6 +118,8 @@ def _process_one(
     if not items:
         log.warn(f"[{label}] 分割結果が0件でした。移動せずそのままにします。")
         return 0
+
+    items = _merge_ideas(items)
 
     if config.dry_run:
         log.log(f"[{label}] （dry-run）{len(items)}件に分割されました:")

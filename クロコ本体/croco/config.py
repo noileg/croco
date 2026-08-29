@@ -167,6 +167,15 @@ class Config:
         return int(self._get("CROCO_MAX_RETRIES", "3") or "3")
 
     @property
+    def expire_days(self) -> int:
+        """未処理・処理中のままこの日数を超えたら「期限切れ」にする。0で無効。
+
+        立て込んでいる時期に新しいアイテムへ押し出され続けて後回しになるのを防ぐ
+        ブレーキ（2026-08-12、本人指定）。様子見でまず1週間から。
+        """
+        return int(self._get("CROCO_EXPIRE_DAYS", "7") or "7")
+
+    @property
     def max_items(self) -> int:
         """1回の起動で連続して処理するアイテム数の上限（たたき台3件）。
 

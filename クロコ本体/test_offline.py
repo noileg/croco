@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from croco import gemini, inbox, notion as nt
+from croco import capture, gemini, inbox, notion as nt
 from croco.config import Config, ConfigError, _parse_env_file
 
 failures = []
@@ -124,6 +124,35 @@ for bad, label in [
         failures.append(f"gemini: {label} で例外が出ませんでした")
     except RuntimeError:
         pass
+
+# --- アイデアの分割結果を1件へ統合（croco/capture.py: _merge_ideas） ---------------
+merged = capture._merge_ideas(
+    [
+        {"title": "予定X", "body": "本文予定", "kind": "予定", "human_reason": "なし"},
+        {"title": "要件1", "body": "本文1", "kind": "アイデア", "human_reason": "なし"},
+        {"title": "要件2", "body": "本文2", "kind": "アイデア", "human_reason": "クロコ自身の改修"},
+        {"title": "要件3", "body": "本文3", "kind": "アイデア", "human_reason": "なし"},
+    ]
+)
+check("merge_ideas: 件数が予定1+統合アイデア1に減る", len(merged), 2)
+check("merge_ideas: 予定はそのまま残る", merged[0]["kind"], "予定")
+check("merge_ideas: 統合後は先頭アイデアの位置に入る", merged[1]["title"], "要件1")
+check("merge_ideas: 本文を逐語で連結する", merged[1]["body"], "本文1\n\n本文2\n\n本文3")
+check(
+    "merge_ideas: 本人対応理由はどれか1件でも付いていれば引き継ぐ",
+    merged[1]["human_reason"],
+    "クロコ自身の改修",
+)
+
+single = capture._merge_ideas(
+    [{"title": "案", "body": "本文", "kind": "アイデア", "human_reason": "なし"}]
+)
+check("merge_ideas: アイデアが1件なら何もしない", single[0]["title"], "案")
+
+no_ideas = capture._merge_ideas(
+    [{"title": "予定X", "body": "本文", "kind": "予定", "human_reason": "なし"}]
+)
+check("merge_ideas: アイデアが無ければ何もしない", len(no_ideas), 1)
 
 # --- 関連アイテム判定（gemini._parse_related） ------------------------------------
 def related_response(ids):
@@ -298,11 +327,12 @@ check("date: None", inbox.normalize_date(None), "")
 check("date: 不正な日付", inbox.normalize_date("2026-13-45"), "")
 
 # --- 並び順（処理中を優先） --------------------------------------------------
-def make_item(status, created, attempts=0):
+def make_item(status, created, attempts=0, last_edited=None):
     return inbox.InboxItem(
         {
-            "id": f"{status}-{created}",
+            "id": f"{status}-{created}-{last_edited}",
             "created_time": created,
+            "last_edited_time": last_edited or created,
             "properties": {
                 inbox.P_TITLE: {"title": [{"plain_text": "t"}]},
                 inbox.P_STATUS: {"select": {"name": status}},
@@ -320,6 +350,30 @@ items = [
 ]
 items.sort(key=inbox.sort_key)
 check("並び順: 処理中が先頭", items[0].status, "処理中")
+
+# --- 期限切れ（2026-08-12） -------------------------------------------------
+check("期限切れはステータスの選択肢にある",
+      "期限切れ" in [o["name"] for o in inbox.SCHEMA[inbox.P_STATUS]["select"]["options"]], True)
+check("既定の期限切れ日数", Config({"_ENV_PATH": "dummy"}).expire_days, 7)
+
+from datetime import datetime, timedelta  # noqa: E402
+
+now = datetime.now().astimezone().isoformat()
+old = (datetime.now().astimezone() - timedelta(days=10)).isoformat()
+
+old_item = make_item("未処理", old)
+fresh_item = make_item("未処理", now)
+check("作成日時の経過: 10日前は閾値7日を超える", inbox.elapsed_days(old_item) >= 7, True)
+check("作成日時の経過: 今日は閾値7日を超えない", inbox.elapsed_days(fresh_item) >= 7, False)
+
+# 実地で発覚したバグの回帰テスト（2026-08-12）：
+# 作成が古くても、今日セッションを重ねて実際に触っていれば期限切れ扱いにしない。
+long_lived_but_active = make_item("未処理", old, last_edited=now)
+check("最終更新の経過: 作成が古くても今日触っていれば7日を超えない",
+      inbox.inactive_days(long_lived_but_active) >= 7, False)
+long_untouched = make_item("未処理", old, last_edited=old)
+check("最終更新の経過: 作成も最終更新も古ければ7日を超える",
+      inbox.inactive_days(long_untouched) >= 7, True)
 
 # --- 実装フェーズが着手しない種別 --------------------------------------------
 check("着手対象外: 予定", "予定" in inbox.NON_IMPLEMENTABLE_KINDS, True)

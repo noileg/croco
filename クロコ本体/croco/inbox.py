@@ -65,6 +65,11 @@ STATUS_REVIEW = "要確認"
 # そこに置き続けるとキューが濁る。かといって「完了」にすると、何もしていないのに
 # 完了したことになり、後から解析するときにデータが歪む。
 STATUS_EXCLUDED = "対象外"
+# 未処理・処理中のまま一定日数動きが無かったもの（2026-08-12）。
+# 立て込んでいる時期は新しいアイテムに押し出され続けて後回しになるが、
+# それを黙って別の場所へ送ると「必要なタスクが静かに消えた」のと区別がつかない。
+# なのでここでは動かさず、ステータスだけ変えて起動時に再開するか問う（croco/expire.py）。
+STATUS_EXPIRED = "期限切れ"
 
 # --- 保留理由 ---------------------------------------------------------
 # 「要確認」に落ちる経路ごとに、何をすればいいかが1対1で決まるように分ける。
@@ -133,6 +138,17 @@ def priority_label(item: "InboxItem") -> str:
     return item.priority or PRIORITY_MID
 
 
+def _days_since(timestamp: str) -> int | None:
+    """ISO 8601文字列から現在までの経過日数。取得できなければNone。"""
+    if not timestamp:
+        return None
+    try:
+        made = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now().astimezone() - made).days
+
+
 def elapsed_days(item: "InboxItem") -> int | None:
     """作成日時（Notionの`created_time`）からの経過日数。取得できなければNone。
 
@@ -142,16 +158,26 @@ def elapsed_days(item: "InboxItem") -> int | None:
     このアーキテクチャは「即処分」が原則（さっさと実装するためのもので、
     寝かせておく前提が無い）なので、知りたいのは「最後にいつ触ったか」ではなく
     「いつから存在し続けているか」。作成日時なら触るだけでは動かないので、
-    こちらに変更した（本人の指摘）。
+    こちらに変更した（本人の指摘）。**表示用の指標**であり、下の`inactive_days`
+    とは目的が違うので混同しないこと。
     """
-    created = item.page.get("created_time", "")
-    if not created:
-        return None
-    try:
-        made = datetime.fromisoformat(created.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return (datetime.now().astimezone() - made).days
+    return _days_since(item.page.get("created_time", ""))
+
+
+def inactive_days(item: "InboxItem") -> int | None:
+    """最終更新（Notionの`last_edited_time`）からの経過日数。取得できなければNone。
+
+    「一定期間、誰も何も動かしていない」の判定用（croco/expire.py）。
+    `elapsed_days`（作成日時基準、表示用）とは別物。**期限切れ判定にelapsed_days
+    を流用したところ、当日に何度もセッションを重ねて実際に作業しているアイテムまで
+    即座に「期限切れ」と判定される不具合が実地で発覚した**（2026-08-12）。
+    dispatch/consultの実作業はNotionページを更新するので`last_edited_time`に
+    素直に反映される。ジャンル一括付与のような機械的なメタデータ更新でも動いて
+    しまう副作用は残るが、それは`--genre-backfill`を手で実行した稀な単発操作に
+    限られ、実害は「期限切れ判定が1サイクル遅れる」程度で小さい。逆側（触っている
+    ものを誤って期限切れにする）の実害の方が大きいため、こちらに倒す。
+    """
+    return _days_since(item.page.get("last_edited_time", ""))
 
 
 def elapsed_label(item: "InboxItem") -> str:
@@ -194,6 +220,7 @@ SCHEMA: dict[str, Any] = {
                 {"name": STATUS_DONE, "color": "green"},
                 {"name": STATUS_REVIEW, "color": "red"},
                 {"name": STATUS_EXCLUDED, "color": "gray"},
+                {"name": STATUS_EXPIRED, "color": "brown"},
             ]
         }
     },

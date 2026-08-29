@@ -37,6 +37,15 @@ except ImportError:  # Windows以外
 # クロコに渡す設定ファイル。--settings で明示的に指定する。
 SETTINGS_PATH = CROCO_HOME / "croco_settings.json"
 
+# Windows のコマンドライン全体の上限（UTF-16単位）。CreateProcessW の制限で、
+# 超えると `[WinError 206] ファイル名または拡張子が長すぎます` になる。
+# プロンプトを引数で渡している以上、長いプロンプトはここで頭打ちになる。
+CMDLINE_LIMIT = 32767
+
+# 起動できなかったときの終了コード。WinError の番号をそのまま使い、
+# ログを追うときに上の説明と突き合わせられるようにする。
+CMDLINE_EXIT = 206
+
 PROMPT_TEMPLATE = """\
 あなたは「クロコ」として、Notionに溜まったアイデアを実装するために自動で起動されました。
 以下のアイデアの実装を、可能なところまで自分で進めてください。
@@ -65,12 +74,32 @@ PROMPT_TEMPLATE = """\
 GitHubへの公開そのものはあなたの仕事ではありません（`git push` と `gh` は拒否されます）。
 ローカルの `git init` / `commit` までは行って構いません。
 
+## 横断探索が必要なとき
+`{projects_dir}` は多数のフォルダを抱えています。複数フォルダを横断して探す・調べる作業
+（類似の過去の対応を探す、関連ファイルの洗い出し等）は、Taskツールで `Explore` タイプの
+サブエージェントに任せてください。検索結果やファイルの中身がそのままあなたの文脈に
+流れ込まず、要約された結果だけが返るので、会話が長くなるのを防げます。
+
+- **委譲してよいのは探索（読み取り）だけです。** ファイルの編集・作成・削除は
+  サブエージェントに任せず、必ずあなた自身が行ってください（介入できる状態を保つため）。
+  `Explore` タイプは元々編集系のツールを持たないので、この線引きを徹底しやすいはずです。
+- 1つのフォルダの中を見るだけなら、サブエージェントを使わず直接読んでください
+  （起動のオーバーヘッドの方が大きくなります）。
+
 ## 進捗の記録（必ず行うこと）
 区切りの良いところまで進んだら、次のコマンドで Notion に進捗を記録してください。
 gitのコミットメッセージのように簡潔に書いてください。
 
+**ただし、決定の理由が本人とのやり取りや検討の中で既に出ている場合、
+要約するときにその理由を削って結論だけにしないでください。** 理由を新しく
+考えて付け足す必要はありません。既に出ている理由を、要約の際に「簡潔さ」を
+理由に捨てるのをやめる、というだけのことです（一言で構いません）。
+特に、一度決めたことを後で覆した場合は、最新の結論とその理由の両方を
+（README等の関連ファイルがあれば、そちらも合わせて）確実に書き残してください。
+古い結論を残したまま気づかず放置するのが一番まずいパターンです。
+
 ```
-python "{cli_path}" log {page_id} "やったことの要約"
+python "{cli_path}" log {page_id} "やったことの要約（理由があれば一言添える）"
 ```
 
 作業が完全に終わったら:
@@ -308,23 +337,45 @@ def _appended(existing: str, message: str) -> str:
     return f"{existing}\n{entry}".strip() if existing else entry
 
 
-def _mark_started(client: nt.Notion, item: inbox.InboxItem) -> None:
+def _mark_started(
+    client: nt.Notion, item: inbox.InboxItem, *, bump_attempts: bool = True
+) -> None:
     """着手をNotionに記録する。
 
     「処理開始日時」は最初に着手したときだけ入れる。発話から着手までの
     ラグを測るための値なので、再開のたびに上書きしてはいけない（仕様書2.5章-10）。
+
+    `bump_attempts=False` は手動モード（`--manual`）用。手で選んで渡すのは
+    無人リトライではないので試行回数に数えない（仕様書4章の「複数日にまたがる
+    項目が試行回数上限を誤検知する」問題を手動経路では踏まないため）。
     """
     properties: dict = {
         inbox.P_STATUS: {"select": {"name": inbox.STATUS_DOING}},
-        inbox.P_ATTEMPTS: {"number": item.attempts + 1},
     }
+    if bump_attempts:
+        properties[inbox.P_ATTEMPTS] = {"number": item.attempts + 1}
     if item.status != inbox.STATUS_DOING:
         properties[inbox.P_STARTED_AT] = {"date": {"start": inbox.now_iso()}}
     client.update_page(item.id, properties)
 
 
+_MANUAL_NOTE = """
+## これは手動で渡された作業です
+本人が一覧から自分で選んで、対話モードのあなたに渡しています。無人実行ではありません。
+- 判断に迷ったら `review` に回さず、その場で本人に聞いてください（画面の向こうにいます）。
+- 「着手してはいけないもの」の線引きそのものは引き続き守ってください
+  （本人名義の文書の本文は書かない、など）。
+"""
+
+
 def _build_prompt(
-    config: Config, item: inbox.InboxItem, body: str, *, client: nt.Notion, gemini: Gemini
+    config: Config,
+    item: inbox.InboxItem,
+    body: str,
+    *,
+    client: nt.Notion,
+    gemini: Gemini,
+    manual: bool = False,
 ) -> str:
     progress = item.result_log.strip() or "（まだありません。今回が初回です）"
     candidates = related.find_candidates(
@@ -335,12 +386,15 @@ def _build_prompt(
         current_title=item.title,
         current_body=body,
     )
+    notes = _resumed_note(item)
+    if manual:
+        notes += _MANUAL_NOTE
     return PROMPT_TEMPLATE.format(
         page_id=item.id,
         title=item.title,
         body=body,
         progress=progress,
-        resumed_note=_resumed_note(item),
+        resumed_note=notes,
         related_note=related.render_section(candidates, allow_review=False),
         projects_dir=config.projects_dir,
         cli_path=CROCO_HOME / "croco_cli.py",
@@ -699,9 +753,48 @@ def launch_claude(config: Config, prompt: str) -> int:
     # ＝消し方が2箇所に分かれてしまう。
     child_env = os.environ | {"CROCO_NOTIFY": "1" if config.notify else "0"}
 
-    if config.interactive:
-        return _run_interactive(command, projects_dir, child_env)
-    return _run_headless(command, projects_dir, child_env)
+    # 起動する前に長さを見る。踏んでからでは `[WinError 206]` としか分からず、
+    # 原因（進捗ログの肥大）に辿り着けないため。
+    if os.name == "nt":
+        length = len(subprocess.list2cmdline(command))
+        if length >= CMDLINE_LIMIT:
+            _report_too_long(prompt, length)
+            return CMDLINE_EXIT
+
+    try:
+        if config.interactive:
+            return _run_interactive(command, projects_dir, child_env)
+        return _run_headless(command, projects_dir, child_env)
+    except OSError as exc:
+        # 上の見積もりが外れた場合の受け皿。生の WinError のまま上へ投げない。
+        if getattr(exc, "winerror", None) != 206:
+            raise
+        _report_too_long(prompt, len(subprocess.list2cmdline(command)))
+        return CMDLINE_EXIT
+
+
+def _report_too_long(prompt: str, length: int) -> None:
+    """プロンプトが長すぎて起動できなかったことを、原因つきで伝える。
+
+    このエラーは**中断と再開を重ねたアイテムでしか起きない**。
+    「これまでの進捗」は毎回のセッションの記録が追記され続けるので、
+    再開のたびに伸びる。新規のアイテムでは起きないため、
+    それを言わないと「たまに落ちる」ようにしか見えない。
+    """
+    log.error(
+        f"プロンプトが長すぎてクロコを起動できません"
+        f"（コマンドライン {length:,} 文字 / Windowsの上限 {CMDLINE_LIMIT:,} 文字）。"
+        f" プロンプト本体は {len(prompt):,} 文字。"
+    )
+    log.error(
+        "  中断と再開を重ねたアイテムは「これまでの進捗」が伸び続けるため、"
+        "一度この長さを超えると、そのアイテムでは毎回ここで落ちます"
+        "（進捗の無い新規アイテムでは起きません）。"
+    )
+    log.error(
+        "  進捗ログを引き継いだ新しいアイテムに切り替えるか、"
+        "Notion側で「実行結果」を短くすると先へ進めます。"
+    )
 
 
 def _run_interactive(command: list[str], projects_dir: Path, env: dict[str, str]) -> int:

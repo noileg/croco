@@ -44,6 +44,7 @@ def show(
         inbox.STATUS_DOING,
         inbox.STATUS_TODO,
         inbox.STATUS_REVIEW,
+        inbox.STATUS_EXPIRED,
         inbox.STATUS_DONE,
         inbox.STATUS_EXCLUDED,
     ]

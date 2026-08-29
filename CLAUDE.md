@@ -13,6 +13,7 @@ Notion + Gemini + Claude Code による個人用ワークフロー自動化パ�
 | 未解決の課題・これからやること | `クロコ本体/クロコ_仕様書_統合版.md` の**4章** |
 | なぜその設計にしたのかの経緯 | `クロコ本体/クロコ_仕様書_統合版.md`（**必要な章だけ**） |
 | 実装の詳細 | 各モジュールのdocstring（冒頭に設計意図を書いてある） |
+| 関連ファイル・過去の経緯の横断的な検索 | grepや記憶での推測より先に台帳（`catalog_cli.py show`のrelations）を見る |
 | すでに片付いた問題の詳細 | `クロコ本体/記録/解決済みの問題.md`（普段は読まなくてよい） |
 | 進行中で途中中断した相談・設計検討 | `クロコ本体/記録/検討中_*.md`（あれば。仕様書4章から辿れる） |
 
@@ -60,6 +61,15 @@ Notion + Gemini + Claude Code による個人用ワークフロー自動化パ�
     証明書チェーンの信頼検証・ホスト名照合・有効期限の確認は引き続き有効。
   → **同種のSSLエラーを見ても再調査不要。** 原因はこれ。
 - 実行時は `PYTHONUTF8=1` を付ける（付けないと日本語出力が化ける）。
+- **本人はObsidianに「AIが一切介在しないメモ」を書く運用を持っている。**
+  専用プラグイン（`プログラミング関係\obsidian-notion-memo\`）が、専用vault
+  （`C:\Users\Seita\Documents\Obsidian Vault`）とNotion側のページツリーを双方向同期する。
+  Notion側のルートは `https://app.notion.com/p/Obsidian-3ea66ce3d0b24b15a01b0dafd9e35cac`。
+  配下に「メモ」が子ページとして並ぶ（例：Google AI Modeでの壁打ち記録など）。
+  **ローカルのvaultフォルダは中身が空に見えることがある**（同期タイミング次第で実体はNotion側にしかない）。
+  中身を読みたいときはローカルファイルを探すのではなく、`クロコ本体\croco\notion.py` の
+  `Notion` クラス（`get_page` / `get_block_children`）でNotion API経由に読みに行くこと
+  （認証情報は `クロコ本体\.env` の `NOTION_TOKEN`）。設計意図は `プログラミング関係\obsidian-notion-memo\README.md`。
 - **`.html` の関連付けは VS Code が握っている。** `os.startfile` ではブラウザで開かず、
   ソースが表示されるだけ。ブラウザで開きたいときは `https` の既定ハンドラ
   （＝Chrome）から実行ファイルを引く。`croco/dispatch.py` の `default_browser()`。
@@ -106,6 +116,7 @@ python run_croco.py --dry-run       # 書き込まず、何をするかだけ表
 python run_croco.py --capture       # 捕捉フェーズのみ
 python run_croco.py --dispatch      # 実装フェーズのみ
 python run_croco.py --status        # 管轄プロジェクトの現状をNotionへ書き出す
+python run_croco.py --manual        # 一覧から1件選んでクロコに渡す（手動・通常実行と並行可。Ctrl+Alt+K）
 ```
 
 ## クロコ本体を直すために開かれたとき
@@ -123,13 +134,27 @@ python run_croco.py --status        # 管轄プロジェクトの現状をNotion
 ## 無人実行の安全策
 
 `croco_settings.json`（`--settings` で渡す。対話・非対話どちらの起動でも渡している）
-の deny リストが最後の砦。deny はどのパーミッションモードでも効く。
+の deny リストが基本の防御。deny はどのパーミッションモードでも効く。
 細かい判断は `--permission-mode auto` に任せる。
+
+**deny の `Edit(path)` はEditツール経由の書き込みしか見ておらず、Bash経由でスクリプトが
+同じパスに書き込むケースは対象外。** 2026-08-26、これが原因で`クロコ管轄プロジェクト/下書き/`
+配下にクロコが書き込む事案が発生した。**deny単体を「最後の砦」として信頼しないこと。**
+詳細は `クロコ本体/README.md` の deny の節。
 
 **このファイルを編集したら必ず検証すること。**
 `-p`（非対話）モードでは検証に失敗した設定ファイルが*無言で無視される*ことを
 確認済み。対話モード（既定）でも同じことが起きるかは未確認。
 書き間違えると deny リストごと効かなくなるおそれがあるため、手順は README 参照。
+
+**`クロコ管轄プロジェクト/下書き/` はdenyに加えてOSレベルでも保護している。**
+Windows Defenderのコントロールされたフォルダーアクセスで、`croco-editor.exe`・
+`C:\Python314\pythonw.exe`・`下書きgit監視/git専用/bin/git.exe`（自動保存ウォッチャー
+専用にコピーしたgit.exe、PATH上の素のgit.exeとは別ファイル）以外からの
+書き込み・作成・削除・リネームを拒否する（読み取りは無制限）。番号振り直し等でクロコがこのフォルダに書き込む必要が
+生じても、**許可アプリ以外からは物理的に書けない。** 本人が一時的に許可したい
+場合は `クロコ管轄プロジェクト/下書き_一時解除.ps1`（管理者権限=UAC必須、
+クロコは実行できない）を使う。詳細は `クロコ管轄プロジェクト/下書き/README.md`。
 
 ## 進め方
 
