@@ -5,46 +5,51 @@ Inboxが増えると、受験関連とクロコ本体改修と雑多なアイデ
 属するか」は価値判断ではなく機械的な仕分けなので、種別と同じくGeminiに
 任せる（related.py・dedupe.pyと同種の、狭く機械的な判定）。
 
-既存ジャンルと同じものは同じ表記で束ねる。表記ゆれで似た束が増殖しないよう、
-毎回すでに使われているジャンル一覧をGeminiへ渡し、実質同じなら既存の表記を
-そのまま使わせる。
+**ジャンルは受験・エディタ・アプリ開発・クロコ本体の4区分に固定する**
+（2026-09-05、本人の判断）。Geminiはこの中から選ぶだけで、当てはまらなければ
+未分類（空文字列）のまま通す。新規作成はさせない。
+
+当初は「既存Inbox実データから機械収集した一覧」を候補にしていたが、
+過去の誤判定で生まれた粒度違いのジャンル（「YouTube DLエクステンション」
+「Windows環境設定」等、個々のアプリ企画ごとの細分化）がそのまま
+「選んでいい候補」として渡り続け、新規作成を禁止しただけでは絞ったことに
+ならなかった（実地でクロコ本体46件中30件・その他4ジャンル22件が誤分類）。
+本人の棚卸しで4区分に統合し、以後はこの固定リストだけを候補にする。
+区分を増減したいときは `ALLOWED_GENRES` を直接編集する（本人だけが行う）。
 """
 
 from __future__ import annotations
 
 from . import inbox, log
-from . import notion as nt
 from .config import Config
+from . import notion as nt
 from .gemini import Gemini
 
-
-def existing_genres(items: list[inbox.InboxItem]) -> list[str]:
-    """現在使われているジャンルの重複無し一覧。"""
-    seen: list[str] = []
-    for item in items:
-        g = (item.genre or "").strip()
-        if g and g not in seen:
-            seen.append(g)
-    return seen
+# Geminiに見せてよい既存ジャンル一覧。固定4区分（上のdocstring参照）。
+ALLOWED_GENRES = ["受験", "エディタ", "アプリ開発", "クロコ本体"]
 
 
-def assign_for_capture(
-    client: nt.Notion, gemini: Gemini, *, data_source_id: str, title: str, body: str
-) -> str:
-    """捕捉フェーズの新規アイテム1件のジャンルを判定する。失敗時は空文字列。
+def assign_for_capture_batch(gemini: Gemini, items: list[dict]) -> list[str]:
+    """1つの生ログから分割された全アイテムのジャンルを1回でまとめて判定する。
 
-    候補（既存ジャンル一覧）は都度Inbox全件から作り直す（dedupe.pyと同じ方式）。
-    同じ捕捉セッション内で複数アイテムを処理する場合、直前に決めた新しい
-    ジャンルを次のアイテムが再利用できるようにするため。
+    分割後のアイテムを1件ずつ判定すると、同じ生ログ由来の話題でも判定が
+    ブレて別ジャンルに割れる不具合が実地で頻発した（2026-09-05、本人の指摘）。
+    1回のAPI呼び出しで全部まとめて見せることで、同じ話題を同じジャンルへ
+    寄せやすくする（assign_genres_batchの発想を捕捉フェーズにも適用）。
+    失敗時・未分類判定時はそのアイテムだけ空文字列にする。
     """
+    if not items:
+        return []
     try:
-        pages = client.query_data_source(data_source_id)
-        items = [inbox.InboxItem(p) for p in pages]
-        genre = gemini.assign_genre(title, body, existing_genres(items))
+        payload = [
+            {"id": str(i), "title": item["title"], "body": item["body"]}
+            for i, item in enumerate(items)
+        ]
+        assignments = gemini.assign_genres_batch(payload, ALLOWED_GENRES)
     except Exception as exc:
         log.warn(f"ジャンル判定に失敗しました（未分類のまま続行します）: {exc}")
-        return ""
-    return genre.strip()
+        return [""] * len(items)
+    return [assignments.get(str(i), "") for i in range(len(items))]
 
 
 def backfill(client: nt.Notion, gemini: Gemini, config: Config) -> int:
@@ -65,13 +70,12 @@ def backfill(client: nt.Notion, gemini: Gemini, config: Config) -> int:
     if not targets:
         return 0
 
-    existing = existing_genres(items)
     payload = [
         {"id": item.id, "title": item.title, "body": client.get_page_text(item.id)}
         for item in targets
     ]
     try:
-        assignments = gemini.assign_genres_batch(payload, existing)
+        assignments = gemini.assign_genres_batch(payload, ALLOWED_GENRES)
     except Exception as exc:
         log.warn(f"ジャンル一括判定に失敗しました（未分類のまま終了します）: {exc}")
         return 0
@@ -80,7 +84,9 @@ def backfill(client: nt.Notion, gemini: Gemini, config: Config) -> int:
     for item in targets:
         genre = assignments.get(item.id)
         if not genre:
-            log.warn(f"[{item.title}] ジャンルが返ってきませんでした（未分類のまま）")
+            # 既存ジャンルに実質同じ括りが無い＝未分類は正常な判定結果
+            # （新規ジャンル作成は本人の判断のみのため、2026-09-05）。
+            log.log(f"  [未分類] {item.title}")
             continue
         client.update_page(item.id, {inbox.P_GENRE: {"rich_text": nt.rich_text(genre)}})
         updated += 1

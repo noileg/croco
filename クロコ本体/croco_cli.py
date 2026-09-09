@@ -11,6 +11,7 @@ Notion の資格情報をクロコのコンテキストに載せずに済み、
     python croco_cli.py review   <page_id> "確認してほしいこと"
     python croco_cli.py resume   <page_id> "決まったこと"
     python croco_cli.py priority <page_id> 高|中|低
+    python croco_cli.py genre    <page_id> <ジャンル名>
     python croco_cli.py list
     python croco_cli.py show     <page_id>
     python croco_cli.py tree
@@ -23,6 +24,7 @@ tree / read は、クロコ用の親ページ配下（Inbox DB以外の子ペー
 
 from __future__ import annotations
 
+import re
 import sys
 
 from croco import inbox, notify, notion as nt
@@ -62,6 +64,74 @@ def _append_log(client: nt.Notion, page_id: str, message: str) -> str:
     stamp = inbox.now_iso()[:16].replace("T", " ")
     entry = f"[{stamp}] {message}"
     return f"{existing}\n{entry}".strip() if existing else entry
+
+
+_ORIGIN_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?"
+    r"[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}"
+)
+
+
+def _origin_key(origin: str) -> str:
+    """「由来メモ」文字列から、突き合わせ用のページIDを取り出して正規化する。
+
+    値は `タイトル (ページID)` 形式だが、一致判定に使うのはIDだけ
+    （タイトルは読みやすさ用の飾り）。IDが見当たらなければ空文字を返し、
+    呼び出し側はカスケードしない（この改修より前の既存アイテムや、手書きの
+    由来メモで、無関係なものを誤って巻き込むのを防ぐ）。
+    """
+    match = _ORIGIN_ID_RE.search(origin or "")
+    return match.group(0).replace("-", "").lower() if match else ""
+
+
+def _cascade_done_to_siblings(
+    client: nt.Notion, config: Config, done_page_id: str
+) -> None:
+    """同じ「由来メモ」を持つ他アイテムも一緒に「完了」にする。
+
+    1本のメモが複数アイテムに割れ、その一部をまとめて実装したとき、
+    実装したぶんだけ done を打てば残りも連動して閉じる（2026-09-09、本人指示：
+    「同じメモ由来別のタスクを含めて処理した場合、処理したタスクまで
+    すべてdoneにする」）。グループの一致は「起草日時」の近似ではなく
+    「由来メモ」カラムの一致で見る。
+
+    - 「由来メモ」が空（この改修より前に作られたアイテム）なら何もしない。
+    - 「由来メモ」にはユニークなページIDが入るので、別メモと衝突しない。
+    - 対象は「完了」以外すべて（未処理・処理中・対象外・要確認）。
+    """
+    origin = nt.plain_text_of(
+        client.get_page(done_page_id).get("properties", {}).get(inbox.P_ORIGIN)
+    )
+    key = _origin_key(origin)
+    if not key:
+        return
+
+    data_source_id = config.inbox_data_source_id or client.resolve_data_source_id(
+        config.inbox_database_id
+    )
+    closed = 0
+    for page in client.query_data_source(data_source_id):
+        sibling = inbox.InboxItem(page)
+        if sibling.id == done_page_id or sibling.status == inbox.STATUS_DONE:
+            continue
+        if _origin_key(sibling.origin) != key:
+            continue
+        updated = _append_log(
+            client,
+            sibling.id,
+            f"同一メモ由来（{origin}）のアイテムを完了したため、まとめて完了",
+        )
+        client.update_page(
+            sibling.id,
+            {
+                inbox.P_STATUS: {"select": {"name": inbox.STATUS_DONE}},
+                inbox.P_FINISHED_AT: {"date": {"start": inbox.now_iso()}},
+                inbox.P_RESULT: {"rich_text": nt.rich_text(updated)},
+            },
+        )
+        closed += 1
+    if closed:
+        print(f"同一メモ由来のため、他 {closed} 件もまとめて「完了」にしました。")
 
 
 def _cmd_list(client: nt.Notion, config: Config) -> int:
@@ -183,6 +253,21 @@ def _cmd_priority(client: nt.Notion, page_id: str, value: str) -> int:
     return 0
 
 
+def _cmd_genre(client: nt.Notion, page_id: str, value: str) -> int:
+    """ジャンルを設定する／変える。
+
+    ジャンルは受験・エディタ・アプリ開発・クロコ本体の4区分に固定
+    （2026-09-05、本人の判断。croco/genre.py の ALLOWED_GENRES）。
+    Geminiにはこの4つの中から選ばせるだけで新規作成はさせない。
+    区分そのものを増減したいときは ALLOWED_GENRES を直接編集する
+    （その変更自体が「本人が決めた」という記録になる）。
+    空文字列を渡せば未分類に戻せる。
+    """
+    client.update_page(page_id, {inbox.P_GENRE: {"rich_text": nt.rich_text(value)}})
+    print(f"ジャンルを設定しました: {value or '（未分類）'}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__, file=sys.stderr)
@@ -204,6 +289,12 @@ def main(argv: list[str]) -> int:
             return 2
         value = argv[2] if len(argv) > 2 else ""
         return _cmd_priority(client, argv[1], value)
+    if argv[0] == "genre":
+        if len(argv) < 2:
+            print("page_idが要ります。", file=sys.stderr)
+            return 2
+        value = argv[2] if len(argv) > 2 else ""
+        return _cmd_genre(client, argv[1], value)
     if argv[0] == "tree":
         return _cmd_tree(client, config)
     if argv[0] == "read":
@@ -250,6 +341,8 @@ def main(argv: list[str]) -> int:
         return 2
 
     client.update_page(page_id, properties)
+    if command == "done":
+        _cascade_done_to_siblings(client, config, page_id)
     print(f"記録しました ({command}): {message}")
     # 書き込みが通ってから鳴らす。失敗したのに終わった音がすると信用できなくなる。
     sound = SOUNDS.get(command)

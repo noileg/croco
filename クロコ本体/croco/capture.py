@@ -85,6 +85,22 @@ def _merge_ideas(items: list[dict]) -> list[dict]:
     return result
 
 
+def _rescue_index(items: list[dict]) -> int:
+    """全アイテムが「対象外」なら先頭の位置(0)、そうでなければ -1 を返す。
+
+    1本のメモを割った結果が予定/資料だけになると、そのメモは「要確認」にも
+    載らず、未処理置き場からも移動済みなので誰の目にも触れず消える。
+    握りつぶし防止に、全滅したときだけ先頭1件を「要確認」へ繰り上げる
+    （inbox.build_properties の rescue_excluded）。1件でも「アイデア」が
+    混じっていれば、それが表に出るので繰り上げない。
+    プロンプトも分類ロジックも変えず、この後処理だけで拾う方針
+    （2026-09-09、本人の判断。「プロンプトも今のままでいい」「全部対象外なら
+    機械的に最初の要素だけ要確認にすればいい」）。
+    """
+    statuses = [inbox.resolve_status(item) for item in items]
+    return 0 if statuses and all(s == inbox.STATUS_EXCLUDED for s in statuses) else -1
+
+
 def _process_one(
     client: nt.Notion,
     gemini: Gemini,
@@ -127,10 +143,23 @@ def _process_one(
             log.log(f"    - [{item['kind']}] {item['title']}")
         return 0
 
+    # 同じ生ログ由来の全アイテムをまとめて1回で判定する。
+    # 1件ずつ判定すると、同じ話題でも別ジャンルに割れる不具合があったため
+    # （2026-09-05、本人の指摘）。
+    item_genres = genre.assign_for_capture_batch(gemini, items)
+
+    # 分割元メモの識別子。同じ生ログから割れた兄弟は全て同じ文字列を持つ。
+    # done を打ったとき、この一致で兄弟を辿ってまとめて完了にする（croco_cli.py）。
+    origin = f"{source['title']} ({page_id})".strip()
+
+    # 1本のメモを割った結果が予定/資料だけ（全て「対象外」）だと、そのメモは
+    # 要確認にも載らず消える。全滅したときだけ先頭1件を「要確認」へ繰り上げる。
+    rescue_index = _rescue_index(items)
+
     # 1件でも登録に失敗したら移動しない。
     # 移動しなければ次回まるごと再試行されるだけで済む。
     registered = 0
-    for item in items:
+    for idx, (item, item_genre) in enumerate(zip(items, item_genres)):
         try:
             duplicate = None
             if item["kind"] == inbox.KIND_SCHEDULE:
@@ -144,6 +173,8 @@ def _process_one(
                     scheduled_date=item.get("scheduled_date", ""),
                 )
             if duplicate:
+                # 既存アイテムへの統合では新規ページを作らないので、由来メモも
+                # 繰り上げも付かない。予定の重複でのみ通る稀な経路なので初版は許容。
                 dedupe.merge_into(
                     client, duplicate, new_title=item["title"], new_body=item["body"]
                 )
@@ -152,17 +183,14 @@ def _process_one(
                     f"({duplicate.id}) と重複と判定し統合しました。"
                 )
             else:
-                item_genre = genre.assign_for_capture(
-                    client,
-                    gemini,
-                    data_source_id=data_source_id,
-                    title=item["title"],
-                    body=item["body"],
-                )
                 client.create_page(
                     data_source_id=data_source_id,
                     properties=inbox.build_properties(
-                        item, spoken_at=captured_at, genre=item_genre
+                        item,
+                        spoken_at=captured_at,
+                        genre=item_genre,
+                        origin=origin,
+                        rescue_excluded=(idx == rescue_index),
                     ),
                     children=nt.paragraph_blocks(item["body"]),
                 )

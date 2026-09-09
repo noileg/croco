@@ -211,39 +211,21 @@ DUPLICATE_SYSTEM_INSTRUCTION = """\
 # ジャンル/プロジェクト分類用のスキーマ。優先度と違い価値判断ではなく機械的な
 # 仕分けなので、種別と同じ扱いでGeminiに任せる（2026-08-01、本人の指摘）。
 # 既存ジャンル一覧を毎回渡し、表記ゆれで似た束が増殖しないようにする。
-GENRE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "genre": {
-            "type": "string",
-            "description": (
-                "このアイテムが属するジャンル/プロジェクト名。"
-                "既存ジャンル一覧の中に実質同じものがあれば、必ずその表記をそのまま使う"
-                "（似た意味の別表記で新しい束を作らないこと）。"
-                "無ければ短い新しいジャンル名を作る（数語程度、例：「受験」"
-                "「クロコ本体」）。内容の要約ではなく、束ねるための短いラベル。"
-            ),
-        }
-    },
-    "required": ["genre"],
-}
-
-GENRE_SYSTEM_INSTRUCTION = """\
-あなたは、新しいメモが既存のジャンル/プロジェクトのどれに属するかを判定する、
-または新しいジャンル名を短く付けるだけの処理系です。
-
-厳守すること:
-- 既存ジャンル一覧に実質同じ括りがあれば、その表記をそのまま返す。
-  「受験」と「受験関連」のような表記ゆれで別の束を作らないこと。
-- 既存のどれにも実質同じ括りが無い場合のみ、新しい短いジャンル名を作る。
-- ジャンル名は内容の要約ではなく、複数アイテムを束ねるための短いラベル
-  （プロジェクト名・分野名程度）にする。
-"""
-
-# 棚卸し（backfill）用の一括判定スキーマ。1件ずつAPIを呼ぶと件数分だけ
-# リクエストを消費し、Gemini無料枠の日次上限（実測20件/日、2026-08-01）に
-# 即座に当たる。複数件をまとめて1回のプロンプトで渡し、まとめて分類させる
-# （このモジュール冒頭の「ブレスト1セッション＝API1回」と同じ発想）。
+#
+# **新しいジャンル名を作る権限はGeminiに持たせない**（2026-09-05、本人の指摘で変更）。
+# 当初は既存に無ければ新しい短いラベルを作らせていたが、「クロコ」のように
+# 意味が広い語を含む本文（クロコが管轄する別アプリ・別プロジェクトの話）を
+# 安易に既存の近いジャンルへ寄せたり、逆に細かすぎる新ジャンルを乱立させたりする
+# 誤りが実地で頻発した。新しいジャンルを立てるかどうかは本人だけの判断とし
+# （`croco_cli.py genre`）、既存に実質同じ括りが無ければ未分類（空文字列）のまま
+# 通す方針にした。
+#
+# 棚卸し（backfill）・捕捉時のバッチ判定で共通して使う。1件ずつAPIを呼ぶと
+# 件数分だけリクエストを消費し、Gemini無料枠の日次上限
+# （実測20件/日、2026-08-01）に即座に当たる。複数件をまとめて1回のプロンプトで
+# 渡し、まとめて分類させる（このモジュール冒頭の「ブレスト1セッション＝API1回」
+# と同じ発想）。単体版（1件だけ判定する`assign_genre`）は使い分ける理由が無く
+# なったため廃止し、常にこちらを使う。
 GENRE_BATCH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -260,10 +242,9 @@ GENRE_BATCH_SCHEMA = {
                     "genre": {
                         "type": "string",
                         "description": (
-                            "このアイテムが属するジャンル/プロジェクト名。"
-                            "既存ジャンル一覧、または他の対象アイテムと実質同じ括りなら"
-                            "同じ表記を使う（表記ゆれで似た束を作らない）。"
-                            "どれにも属さなければ短い新しいジャンル名を作る。"
+                            "既存ジャンル一覧の中に実質同じ括りがあれば、その表記をそのまま使う"
+                            "（表記ゆれで似た束を作らない）。既存のどれにも属さない場合は"
+                            "空文字列を返す（新しいジャンル名を作らない）。"
                         ),
                     },
                 },
@@ -275,14 +256,17 @@ GENRE_BATCH_SCHEMA = {
 }
 
 GENRE_BATCH_SYSTEM_INSTRUCTION = """\
-あなたは、複数のメモをジャンル/プロジェクト単位に束ねるだけの処理系です。
+あなたは、複数のメモを既存のジャンル/プロジェクトへ割り振るだけの処理系です。
 
 厳守すること:
 - 全対象アイテムに、渡されたidそのままで1件ずつジャンルを割り振る。抜かさない。
 - 既存ジャンル一覧に実質同じ括りがあれば、その表記をそのまま使う。
-- 既存に無くても、**対象アイテム同士で実質同じ括りなら同じ新しいジャンル名**を使う
-  （表記ゆれで別々の束を作らない）。
-- ジャンル名は内容の要約ではなく、束ねるための短いラベル（プロジェクト名・分野名程度）。
+- 既存のどれにも実質同じ括りが無い場合は、必ず空文字列を返す。
+  **新しいジャンル名を作ってはいけない。** 新しいジャンルを立てるかどうかは本人だけが判断する。
+  対象アイテム同士が実質同じ話でも、既存に無ければ新しい名前を作らず全て空文字列にする。
+- 判定は表面的な単語の一致ではなく実質的な括りで行う。
+  例えば本文に「クロコ」という語が出てくるだけで、既存の似た名前のジャンルへ
+  安易に寄せてはいけない。実質的に別の話なら空文字列（未分類）にする。
 """
 
 
@@ -439,47 +423,13 @@ class Gemini:
         valid_ids = {c["id"] for c in candidates}
         return _parse_duplicate(response, valid_ids=valid_ids)
 
-    def assign_genre(self, title: str, body: str, existing_genres: list[str]) -> str:
-        """アイテム1件のジャンル/プロジェクト名を判定する。
-
-        既存ジャンル一覧に実質同じ括りがあればその表記を、無ければ新しい
-        短いラベルを返す。呼び出し失敗はここでは吸収しない（呼び出し元の
-        genre.py が「未分類のまま」として吸収する）。
-        """
-        genres_block = "\n".join(f"- {g}" for g in existing_genres) or "（まだ無い）"
-        prompt = (
-            f"## 既存ジャンル一覧\n{genres_block}\n\n"
-            f"## 新しいアイテム\nタイトル: {title}\n本文: {body}"
-        )
-
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "systemInstruction": {"parts": [{"text": GENRE_SYSTEM_INSTRUCTION}]},
-            "generationConfig": {
-                "temperature": self._temperature,
-                "thinkingConfig": {"thinkingLevel": self._thinking_level},
-                "responseFormat": {
-                    "text": {
-                        "mimeType": "APPLICATION_JSON",
-                        "schema": GENRE_SCHEMA,
-                    }
-                },
-            },
-        }
-
-        response = httpjson.request_json(
-            f"{API_BASE}/models/{self._model}:generateContent",
-            method="POST",
-            headers={"x-goog-api-key": self._api_key},
-            payload=payload,
-        )
-        return _parse_genre(response)
-
     def assign_genres_batch(
         self, items: list[dict], existing_genres: list[str]
     ) -> dict[str, str]:
-        """複数アイテムのジャンルを1回のAPI呼び出しでまとめて判定する（棚卸し用）。
+        """複数アイテムのジャンルを1回のAPI呼び出しでまとめて判定する。
 
+        棚卸し（backfill）だけでなく、捕捉フェーズ（1つの生ログを分割した
+        全アイテム分をまとめて判定）でも使う（2026-09-05）。
         `items` は [{"id":..,"title":..,"body":..}, ...]。件数が多いとプロンプトが
         長くなる分だけ時間がかかるが、API呼び出し回数は1回で済む（無料枠の
         日次上限に当たらないようにするため。2026-08-01、429連発への対応）。
@@ -553,26 +503,6 @@ def _parse_genre_batch(response: dict, *, valid_ids: set[str]) -> dict[str, str]
         ):
             result[item_id] = genre.strip()
     return result
-
-
-def _parse_genre(response: dict) -> str:
-    """レスポンスから genre を取り出す。壊れていれば空文字列（未分類）。
-
-    _parse_related と同じ理由（補助機能なので例外を投げない）。
-    """
-    candidates = response.get("candidates") or []
-    if not candidates:
-        return ""
-    parts = candidates[0].get("content", {}).get("parts") or []
-    text = "".join(part.get("text", "") for part in parts).strip()
-    if not text:
-        return ""
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return ""
-    genre = parsed.get("genre")
-    return genre.strip() if isinstance(genre, str) else ""
 
 
 def _parse_duplicate(response: dict, *, valid_ids: set[str]) -> str:

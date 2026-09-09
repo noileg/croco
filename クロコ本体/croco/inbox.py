@@ -44,6 +44,12 @@ P_PRIORITY = "優先度"
 # （croco/genre.py）。自由記述にしているのは、selectだと事前に選択肢を
 # 列挙する必要があり、増えるたびにスキーマ変更が要るため。
 P_GENRE = "ジャンル"
+# 分割元の「未処理置き場」子ページの識別子（`タイトル (ページID)` 形式）（2026-09-09）。
+# 同じ生ログから割れた兄弟アイテムは全て同じ文字列を持つ。croco_cli.py の done が
+# これを辿って、同一メモ由来の他アイテムもまとめて完了にする。当初は「起草日時」の
+# 一致で近似的に束ねる案だったが、近似ではなく明示カラムで持つことにした（本人の判断）。
+# 元ページは処理済み置き場へ移動してもIDは不変なので、後からでも辿れる。
+P_ORIGIN = "由来メモ"
 
 # --- 選択肢 -----------------------------------------------------------
 
@@ -254,6 +260,7 @@ SCHEMA: dict[str, Any] = {
         }
     },
     P_GENRE: {"rich_text": {}},
+    P_ORIGIN: {"rich_text": {}},
 }
 
 
@@ -283,40 +290,85 @@ def normalize_date(value: str | None) -> str:
         return ""
 
 
-def build_properties(item: dict, *, spoken_at: str | None, genre: str = "") -> dict:
+def _hold_reason(item: dict) -> str:
+    """Gemini の human_reason を、既知の保留理由へ正規化する。
+
+    値が欠けていた・知らない値だった場合は安全側（本人対応が必要）に倒す。
+    「なし」に薄まると自動で着手対象になってしまうため。
+    """
+    reason = item.get("human_reason") or HOLD_JUDGEMENT
+    return reason if reason in HOLD_REASONS else HOLD_JUDGEMENT
+
+
+def resolve_status(item: dict) -> str:
+    """Gemini の出力1件から、作成時のステータスを決める純関数。
+
+    build_properties が使うほか、capture が「1本のメモを割った結果、
+    全アイテムが対象外になっていないか」の判定に使う（全滅していたら
+    握りつぶし防止に先頭1件を要確認へ繰り上げる、build_properties の
+    rescue_excluded）。
+    """
+    if (item.get("kind") or KIND_IDEA) in NON_IMPLEMENTABLE_KINDS:
+        # 予定・資料はそもそも着手されないので、キューに残さない。
+        return STATUS_EXCLUDED
+    # 本人自身が対応すべきものは、最初から自動キューに入れない。
+    # プロンプトで自制させる方法もあるが指示は破られうる。分類の段階で
+    # 「要確認」に落としておけば、そもそも着手対象に選ばれない。
+    if _hold_reason(item) != HOLD_NONE:
+        return STATUS_REVIEW
+    return STATUS_TODO
+
+
+def build_properties(
+    item: dict,
+    *,
+    spoken_at: str | None,
+    genre: str = "",
+    origin: str | None = None,
+    rescue_excluded: bool = False,
+) -> dict:
     """Gemini の出力1件を Notion のプロパティ辞書に変換する。
 
     ステータスは作成時つねに「未処理」固定なのでここでハードコードする
     （Gemini のスキーマには含めない：仕様書2.5章-11）。
+
+    `origin` は分割元メモの識別子（P_ORIGIN）。同じ生ログ由来の兄弟は
+    全て同じ文字列になる。`rescue_excluded=True` は、1本のメモを割った
+    結果が全て「対象外」だったときに先頭1件へ渡す印で、そのときだけ
+    「対象外」を「要確認」へ繰り上げる（種別は予定/資料のまま変えない）。
     """
-    kind = item.get("kind") or KIND_IDEA
+    reason = _hold_reason(item)
+    status = resolve_status(item)
 
-    # 本人自身が対応すべきものは、最初から自動キューに入れない。
-    # 実装フェーズ側の指示（プロンプト）で自制させる方法もあるが、指示は破られうる。
-    # 分類の段階で「要確認」に落としておけば、そもそも着手対象に選ばれない。
-    # 値が欠けていた・知らない値だった場合は安全側（本人対応が必要）に倒す。
-    reason = item.get("human_reason") or HOLD_JUDGEMENT
-    if reason not in HOLD_REASONS:
-        reason = HOLD_JUDGEMENT
-
-    if kind in NON_IMPLEMENTABLE_KINDS:
-        # 予定・資料はそもそも着手されないので、キューに残さない。
-        status = STATUS_EXCLUDED
-    elif reason != HOLD_NONE:
+    rescued = status == STATUS_EXCLUDED and rescue_excluded
+    if rescued:
+        # 同一メモ由来のアイテムが全て「対象外」だと、そのメモは要確認にも
+        # 載らず、未処理置き場からも移動済みなので誰の目にも触れず消える。
+        # 先頭だけ「要確認」に繰り上げて拾えるようにする。保留理由は
+        # 既存の「本人の判断」を流用する（新しい選択肢を足さない）。
         status = STATUS_REVIEW
-    else:
-        status = STATUS_TODO
+        reason = HOLD_JUDGEMENT
 
     properties: dict[str, Any] = {
         P_TITLE: {"title": nt.rich_text(item["title"])},
-        P_KIND: {"select": {"name": kind}},
+        P_KIND: {"select": {"name": item.get("kind") or KIND_IDEA}},
         P_STATUS: {"select": {"name": status}},
         P_ATTEMPTS: {"number": 0},
         P_HOLD_REASON: {"select": {"name": reason}},
     }
     if genre:
         properties[P_GENRE] = {"rich_text": nt.rich_text(genre)}
-    if status == STATUS_REVIEW:
+    if origin:
+        properties[P_ORIGIN] = {"rich_text": nt.rich_text(origin)}
+    if rescued:
+        properties[P_RESULT] = {
+            "rich_text": nt.rich_text(
+                f"[{now_iso()[:16].replace('T', ' ')}] "
+                f"同一メモ由来のアイテムが全て「{STATUS_EXCLUDED}」だったため、"
+                f"握りつぶし防止に先頭を「{STATUS_REVIEW}」へ繰り上げ"
+            )
+        }
+    elif status == STATUS_REVIEW:
         properties[P_RESULT] = {
             "rich_text": nt.rich_text(
                 f"[{now_iso()[:16].replace('T', ' ')}] "
@@ -360,6 +412,7 @@ class InboxItem:
         self.hold_reason = nt.select_of(props.get(P_HOLD_REASON))
         self.priority = nt.select_of(props.get(P_PRIORITY))
         self.genre = nt.plain_text_of(props.get(P_GENRE))
+        self.origin = nt.plain_text_of(props.get(P_ORIGIN))
         attempts = props.get(P_ATTEMPTS) or {}
         self.attempts = int(attempts.get("number") or 0)
         tokens = props.get(P_TOKENS) or {}

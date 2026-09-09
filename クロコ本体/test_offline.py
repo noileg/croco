@@ -1294,6 +1294,194 @@ check(
 )
 check("priority: 不正な値は拒否され、書き込まれない", cli_run_priority(["pid", "最強"]), (2, None))
 
+
+class _GenreNotion:
+    def __init__(self):
+        self.updated = None
+
+    def update_page(self, page_id, properties):
+        self.updated = (page_id, properties)
+
+
+def cli_run_genre(args):
+    fake = _GenreNotion()
+    croco_cli.Config = lambda: Config({"NOTION_TOKEN": "t"})
+    croco_cli.nt.Notion = lambda *a, **kw: fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = croco_cli.main(["genre", *args])
+    finally:
+        croco_cli.Config, croco_cli.nt.Notion = _saved_cli
+    return code, fake.updated
+
+
+check(
+    "genre: ジャンルを設定できる",
+    cli_run_genre(["pid", "受験"]),
+    (0, ("pid", {inbox.P_GENRE: {"rich_text": nt.rich_text("受験")}})),
+)
+check(
+    "genre: 空文字列で未分類に戻せる",
+    cli_run_genre(["pid", ""]),
+    (0, ("pid", {inbox.P_GENRE: {"rich_text": []}})),
+)
+
+# --- A: resolve_status と、全滅メモの繰り上げ（2026-09-09） ----------------------
+check("resolve_status: アイデア＋なし → 未処理",
+      inbox.resolve_status({"kind": "アイデア", "human_reason": "なし"}), inbox.STATUS_TODO)
+check("resolve_status: アイデア＋本人対応 → 要確認",
+      inbox.resolve_status({"kind": "アイデア", "human_reason": inbox.HOLD_CROCO}),
+      inbox.STATUS_REVIEW)
+check("resolve_status: 予定 → 対象外",
+      inbox.resolve_status({"kind": "予定", "human_reason": "なし"}), inbox.STATUS_EXCLUDED)
+check("resolve_status: 資料 → 対象外",
+      inbox.resolve_status({"kind": "資料"}), inbox.STATUS_EXCLUDED)
+check("resolve_status: human_reason欠落は安全側（要確認）",
+      inbox.resolve_status({"kind": "アイデア"}), inbox.STATUS_REVIEW)
+check("resolve_status: build_properties のステータスと一致する",
+      inbox.build_properties(
+          {"title": "x", "kind": "予定", "scheduled_date": "", "human_reason": "なし"},
+          spoken_at=None,
+      )[inbox.P_STATUS]["select"]["name"],
+      inbox.resolve_status({"kind": "予定", "human_reason": "なし"}))
+
+# 全アイテムが対象外なら先頭だけ「要確認」へ繰り上げる（種別は変えない）
+rescued = inbox.build_properties(
+    {"title": "資料っぽいメモ", "kind": "資料", "scheduled_date": "", "human_reason": "なし"},
+    spoken_at=None, rescue_excluded=True,
+)
+check("繰り上げ: ステータスが要確認になる", rescued[inbox.P_STATUS]["select"]["name"], "要確認")
+check("繰り上げ: 種別は資料のまま（dispatchは拾わない）",
+      rescued[inbox.P_KIND]["select"]["name"], "資料")
+check("繰り上げ: 保留理由は本人の判断を流用（案a）",
+      rescued[inbox.P_HOLD_REASON]["select"]["name"], inbox.HOLD_JUDGEMENT)
+_rescue_text = "".join(c["text"]["content"] for c in rescued[inbox.P_RESULT]["rich_text"])
+check("繰り上げ: 専用の注記が残る", "繰り上げ" in _rescue_text, True)
+check("繰り上げ: 通常の要確認とは別の文言", "着手せず要確認にした" in _rescue_text, False)
+
+check("繰り上げ: rescue_excluded=Falseなら対象外のまま",
+      inbox.build_properties(
+          {"title": "x", "kind": "資料", "scheduled_date": "", "human_reason": "なし"},
+          spoken_at=None, rescue_excluded=False,
+      )[inbox.P_STATUS]["select"]["name"], "対象外")
+check("繰り上げ: 対象外でない種別に渡しても無視される",
+      inbox.build_properties(
+          {"title": "x", "kind": "アイデア", "scheduled_date": "", "human_reason": "なし"},
+          spoken_at=None, rescue_excluded=True,
+      )[inbox.P_STATUS]["select"]["name"], "未処理")
+
+check("繰り上げ判定: 全部予定/資料なら先頭",
+      capture._rescue_index([{"kind": "予定"}, {"kind": "資料"}]), 0)
+check("繰り上げ判定: アイデアが1件でも混じれば -1",
+      capture._rescue_index(
+          [{"kind": "予定"}, {"kind": "アイデア", "human_reason": "なし"}]), -1)
+check("繰り上げ判定: 空リストは -1", capture._rescue_index([]), -1)
+check("繰り上げ判定: 要確認のアイデアだけでも -1（表に出るため）",
+      capture._rescue_index([{"kind": "アイデア", "human_reason": inbox.HOLD_CROCO}]), -1)
+
+# --- B: 由来メモ カラム（2026-09-09） --------------------------------------------
+check("由来メモ: SCHEMA に rich_text で入っている",
+      inbox.SCHEMA[inbox.P_ORIGIN], {"rich_text": {}})
+_op = inbox.build_properties(
+    {"title": "x", "kind": "アイデア", "scheduled_date": "", "human_reason": "なし"},
+    spoken_at=None, origin="メモの題 (abcd1234-1111-2222-3333-444455556666)",
+)
+check("由来メモ: origin を渡すと書かれる",
+      "".join(c["text"]["content"] for c in _op[inbox.P_ORIGIN]["rich_text"]),
+      "メモの題 (abcd1234-1111-2222-3333-444455556666)")
+check("由来メモ: origin 未指定なら書かれない",
+      inbox.P_ORIGIN in inbox.build_properties(
+          {"title": "x", "kind": "アイデア", "scheduled_date": "", "human_reason": "なし"},
+          spoken_at=None), False)
+check("由来メモ: InboxItem が読める",
+      inbox.InboxItem({"id": "x", "properties": {
+          inbox.P_ORIGIN: {"rich_text": [{"plain_text": "題 (pid)"}]}}}).origin, "題 (pid)")
+check("由来メモ: 未設定は空文字",
+      inbox.InboxItem({"id": "x", "properties": {}}).origin, "")
+
+check("origin_key: IDだけを取り出して正規化する（ダッシュ除去・小文字化）",
+      croco_cli._origin_key("題 (AAaaAAaa-1111-2222-3333-444444444444)"),
+      "aaaaaaaa" + "1111" + "2222" + "3333" + "4" * 12)
+check("origin_key: IDが無ければ空", croco_cli._origin_key("題だけ"), "")
+check("origin_key: 空文字も空", croco_cli._origin_key(""), "")
+
+# --- B: done カスケード（同一メモ由来をまとめて完了） -----------------------------
+_ORIGIN_A = "メモA (aaaaaaaa-1111-2222-3333-444444444444)"
+_ORIGIN_B = "メモB (bbbbbbbb-1111-2222-3333-444444444444)"
+
+
+class _CascadeNotion:
+    def __init__(self, pages):
+        self._pages = {p["id"]: p for p in pages}
+        self.updates = {}
+
+    def get_page(self, page_id):
+        return self._pages[page_id]
+
+    def query_data_source(self, data_source_id, *, filter_=None, sorts=None):
+        return list(self._pages.values())
+
+    def update_page(self, page_id, properties):
+        self.updates.setdefault(page_id, {}).update(properties)
+        # ページ側にも反映して、_append_log が最新を読めるようにする
+        self._pages.setdefault(page_id, {"id": page_id, "properties": {}})
+        self._pages[page_id].setdefault("properties", {}).update(properties)
+
+
+def _cascade_page(pid, origin, status=inbox.STATUS_TODO):
+    return {
+        "id": pid,
+        "properties": {
+            inbox.P_TITLE: {"title": [{"plain_text": pid}]},
+            inbox.P_STATUS: {"select": {"name": status}},
+            inbox.P_ORIGIN: {"rich_text": [{"plain_text": origin}] if origin else []},
+        },
+    }
+
+
+def run_done_cascade(pages, done_id):
+    fake = _CascadeNotion(pages)
+    recorder = _Recorder()
+    saved = (_notify.winsound, croco_cli.Config, croco_cli.nt.Notion)
+    _notify.winsound = recorder
+    croco_cli.Config = lambda: Config(
+        {"NOTION_TOKEN": "t", "NOTION_INBOX_DATA_SOURCE_ID": "ds"}
+    )
+    croco_cli.nt.Notion = lambda *a, **kw: fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            croco_cli.main(["done", done_id, "実装した"])
+    finally:
+        _notify.winsound, croco_cli.Config, croco_cli.nt.Notion = saved
+    return fake
+
+
+def _is_done(props):
+    return props.get(inbox.P_STATUS, {}).get("select", {}).get("name") == inbox.STATUS_DONE
+
+
+_c1 = run_done_cascade(
+    [
+        _cascade_page("a1", _ORIGIN_A),
+        _cascade_page("a2", _ORIGIN_A, status=inbox.STATUS_REVIEW),
+        _cascade_page("a3", _ORIGIN_A, status=inbox.STATUS_EXCLUDED),
+        _cascade_page("b1", _ORIGIN_B),
+        _cascade_page("a4", _ORIGIN_A, status=inbox.STATUS_DONE),
+    ],
+    "a1",
+)
+check("done カスケード: 同一由来の未完了を全て完了にする",
+      {pid for pid, p in _c1.updates.items() if _is_done(p)}, {"a1", "a2", "a3"})
+check("done カスケード: 別メモ由来は巻き込まない", "b1" in _c1.updates, False)
+check("done カスケード: 既に完了のものは触らない", "a4" in _c1.updates, False)
+check("done カスケード: 連動完了の注記が残る",
+      "まとめて完了" in "".join(
+          c["text"]["content"] for c in _c1.updates["a2"][inbox.P_RESULT]["rich_text"]),
+      True)
+
+_c2 = run_done_cascade([_cascade_page("n1", ""), _cascade_page("n2", "")], "n1")
+check("done カスケード: 由来メモが空なら他を触らない", "n2" in _c2.updates, False)
+
 # --- 結果 ----------------------------------------------------------------
 if failures:
     print(f"FAILED ({len(failures)})")
