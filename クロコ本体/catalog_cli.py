@@ -9,6 +9,7 @@ stage/status/lore や relations は判断が要るため、こちらから明示
   python catalog_cli.py relate "A.md" derived_from "B.md"        # weight省略時は既定1
   python catalog_cli.py relate "A.md" derived_from "B.md" --weight 3  # 本体等、強い関係
   python catalog_cli.py show "C:\\path\\to\\file.md"
+  python catalog_cli.py index                            # README.mdのあるフォルダ+loreの索引(新規フォルダ前の関連確認・横断検索の入口)
   python catalog_cli.py move "旧パス" "新パス"          # 実移動＋台帳付け替え＋該当すればgit commit
   python catalog_cli.py sweep                            # 台帳上で消えているpathを報告
   python catalog_cli.py scan "<フォルダ>"                # そのフォルダ配下で台帳に未登録のファイルを報告
@@ -92,6 +93,34 @@ def cmd_show(args: argparse.Namespace) -> None:
             arrow = "→" if r["from_id"] == args.path else "←"
             other = r["to_id"] if r["from_id"] == args.path else r["from_id"]
             print(f"  {arrow} [{r['relation_type']} w={r['weight']}] {other}  ({r['created_at']})")
+
+
+def cmd_index(args: argparse.Namespace) -> None:
+    """README.mdを持つフォルダの名前とそのloreをコンパクトに一覧表示する。
+
+    新規フォルダを作る前に既存プロジェクトとの関連を確認するための索引
+    （2026-09-17、本人の設計）。loreは`set <README.mdの絶対パス> lore "<要約>"`で埋める。
+    フォルダ横断で探す場所を絞る用途にも使うため、クロコ管轄プロジェクトの外や
+    サブフォルダも出す。新規フォルダ作成前の確認で主に見るクロコ管轄プロジェクト直下は
+    名前だけで先にまとめ、それ以外は絶対パスで後ろに続ける。
+    """
+    top: list[tuple[str, str | None]] = []
+    others: list[tuple[str, str | None]] = []
+    for folder, lore in catalog_db.readme_folder_index():
+        if catalog_db.is_project_readme(str(Path(folder) / "README.md")):
+            top.append((Path(folder).name, lore))
+        else:
+            others.append((folder, lore))
+    if not top and not others:
+        print("(README.mdのあるフォルダが台帳にありません)")
+        return
+    print("クロコ管轄プロジェクト直下:")
+    for name, lore in top:
+        print(f"- {name}: {lore if lore else '(lore未設定)'}")
+    if others:
+        print("\nその他（絶対パス）:")
+        for folder, lore in others:
+            print(f"- {folder}: {lore if lore else '(lore未設定)'}")
 
 
 def cmd_scan(args: argparse.Namespace) -> None:
@@ -242,6 +271,9 @@ def main() -> None:
 
     p_sweep = sub.add_parser("sweep", help="台帳上のpathで実在しないものを報告(読み取り専用)")
     p_sweep.set_defaults(func=cmd_sweep)
+
+    p_index = sub.add_parser("index", help="README.mdのあるフォルダとloreの一覧(新規フォルダ作成前の関連確認・横断検索の入口)")
+    p_index.set_defaults(func=cmd_index)
 
     p_scan = sub.add_parser("scan", help="指定フォルダ配下で台帳に未登録のファイルを報告(読み取り専用)")
     p_scan.add_argument("folder")

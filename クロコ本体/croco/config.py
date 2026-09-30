@@ -207,26 +207,34 @@ class Config:
 
     @property
     def editor_path(self) -> Path | None:
-        """下書きエディタの起動口（`open_file.pyw`）の場所。
+        """下書きエディタの起動口（`croco-editor.exe`）の場所。
 
         本人が書く文書のときだけ開く。クロコはCLIなので文章を書く場所にならず、
         書くのは本人・相談相手がクロコ、という分担にしているため。
         無ければ開かないだけなので必須ではない。
 
         **エディタはクロコの一部ではない。** 単体で使える別の道具なので、
-        別リポジトリ（Twitter-like-char-counter）に置いてパスで呼ぶ。
+        別リポジトリ（croco-editor）に置いてパスで呼ぶ。
         クロコの中に置くと、直すたびに2箇所へ同じ修正を当てることになる。
 
-        **代償として、向こうでファイル名が変わるとここが黙って壊れる。**
+        既定はソースからビルドした実体（`csharp/out/croco-editor.exe`）を直接指す。
+        配布用インストーラ（`croco-editor-setup-*.exe`）経由でインストールした場合は
+        `CROCO_EDITOR_PATH` でインストール先を上書きする。
+
+        **代償として、向こうでファイル名や配置が変わるとここが黙って壊れる。**
         実際 `open_md.pyw` → `open_file.pyw` の改名で一度壊れた（2026-07-27）。
-        無ければ開かないだけの作りなのでエラーも出ず、気づく手がかりが無い。
-        `test_offline.py` が既定パスの実在を確認しているのはこのため。
+        その後 Twitter-like-char-counter（Python/tkinter）から croco-editor
+        （C#/WinForms+WebView2）への書き直しでも、この参照の更新漏れが起きた
+        （2026-09-11）。無ければ開かないだけの作りなのでエラーも出ず、
+        気づく手がかりが無い。`test_offline.py` が既定パスの実在を確認しているのは
+        このためだが、旧フォルダが削除されずに残っていると「実在するか」だけでは
+        この種の劣化を検知できない。
         """
         value = self._env.get("CROCO_EDITOR_PATH")
         if value:
             return Path(value)
         return (CROCO_HOME.parent.parent / "プログラミング関係"
-                / "Twitter-like-char-counter" / "open_file.pyw")
+                / "croco-editor" / "csharp" / "out" / "croco-editor.exe")
 
     @property
     def log_dir(self) -> Path:

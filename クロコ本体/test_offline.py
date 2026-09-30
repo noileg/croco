@@ -84,6 +84,36 @@ para = nt.paragraph_blocks("一行目\n\n三行目")
 check("paragraph_blocks: 行数（空行も保持）", len(para), 3)
 check("paragraph_blocks: 空行の中身", para[1]["paragraph"]["rich_text"], [])
 
+# --- create_child_page のペイロード -----------------------------------------
+_ccp_client = nt.Notion("dummy-token", "2026-03-11")
+_ccp_captured = {}
+_ccp_client._call = lambda method, path, payload=None: _ccp_captured.update(
+    method=method, path=path, payload=payload
+) or {}
+_ccp_client.create_child_page(
+    parent_page_id="parent-1", title="タイトル", children=[{"type": "paragraph"}]
+)
+check("create_child_page: メソッド", _ccp_captured["method"], "POST")
+check("create_child_page: パス", _ccp_captured["path"], "/pages")
+check(
+    "create_child_page: 親はページID指定",
+    _ccp_captured["payload"]["parent"],
+    {"type": "page_id", "page_id": "parent-1"},
+)
+check(
+    "create_child_page: title プロパティ",
+    _ccp_captured["payload"]["properties"],
+    {"title": {"title": nt.rich_text("タイトル")}},
+)
+check("create_child_page: children", _ccp_captured["payload"]["children"], [{"type": "paragraph"}])
+
+_ccp_client.create_child_page(parent_page_id="parent-1", title="タイトル")
+check(
+    "create_child_page: children省略時は含めない",
+    "children" in _ccp_captured["payload"],
+    False,
+)
+
 # --- プロパティ読み出し ----------------------------------------------------
 check("plain_text_of: title", nt.plain_text_of({"title": [{"plain_text": "T"}]}), "T")
 check("plain_text_of: None", nt.plain_text_of(None), "")
@@ -154,29 +184,41 @@ no_ideas = capture._merge_ideas(
 )
 check("merge_ideas: アイデアが無ければ何もしない", len(no_ideas), 1)
 
-# --- 関連アイテム判定（gemini._parse_related） ------------------------------------
-def related_response(ids):
-    return {"candidates": [{"content": {"parts": [{"text": json.dumps({"related_ids": ids})}]}}]}
+# --- 台帳フォルダの関連判定（gemini._parse_related_folders） -----------------------
+def related_folders_response(folders):
+    return {
+        "candidates": [{"content": {"parts": [{"text": json.dumps({"related_folders": folders})}]}}]
+    }
 
 
 check(
-    "related: 候補集合に無いidは弾く",
-    gemini._parse_related(related_response(["a", "x"]), valid_ids={"a", "b"}),
-    ["a"],
+    "related_folders: 候補集合に無いフォルダ名は弾く",
+    gemini._parse_related_folders(
+        related_folders_response(["下書き", "存在しない"]), valid_folders={"下書き", "受験"}
+    ),
+    ["下書き"],
 )
-check("related: candidatesが空なら空", gemini._parse_related({"candidates": []}, valid_ids={"a"}), [])
 check(
-    "related: JSONでない応答は例外にせず空扱い",
-    gemini._parse_related(
-        {"candidates": [{"content": {"parts": [{"text": "not json"}]}}]}, valid_ids={"a"}
+    "related_folders: candidatesが空なら空",
+    gemini._parse_related_folders({"candidates": []}, valid_folders={"下書き"}),
+    [],
+)
+check(
+    "related_folders: JSONでない応答は例外にせず空扱い",
+    gemini._parse_related_folders(
+        {"candidates": [{"content": {"parts": [{"text": "not json"}]}}]}, valid_folders={"下書き"}
     ),
     [],
 )
 check(
-    "related: related_idsが配列でなければ空扱い",
-    gemini._parse_related(
-        {"candidates": [{"content": {"parts": [{"text": json.dumps({"related_ids": "a"})}]}}]},
-        valid_ids={"a"},
+    "related_folders: related_foldersが配列でなければ空扱い",
+    gemini._parse_related_folders(
+        {
+            "candidates": [
+                {"content": {"parts": [{"text": json.dumps({"related_folders": "下書き"})}]}}
+            ]
+        },
+        valid_folders={"下書き"},
     ),
     [],
 )
@@ -572,12 +614,15 @@ check("pythonwで起動する", Path(_spawned[0]).name.lower(), "pythonw.exe")
 check("設定されたエディタを起動する", _spawned[1:], [str(Path(__file__))])
 check("本人名義の文書でなければ開かない",
       open_editor_with(inbox.HOLD_CROCO), [])
-# エディタはクロコの一部ではない。別リポジトリの起動口をパスで呼ぶ
+# エディタはクロコの一部ではない。別リポジトリ（croco-editor）の起動口をパスで呼ぶ
 check("エディタの既定パスは別リポジトリの起動口",
-      cfg.editor_path.parent.name, "Twitter-like-char-counter")
+      "croco-editor" in cfg.editor_path.parts, True)
+check("エディタの既定パスはexeの起動口", cfg.editor_path.name, "croco-editor.exe")
 # **ファイル名を突き合わせるだけでは足りない。** 実在を見ること。
-# 向こうで改名されると、こちらは無ければ黙って開かないだけなので誰も気づかない
-# （実際 open_md.pyw → open_file.pyw の改名で一度壊れた）。
+# 向こうで改名・配置換えされると、こちらは無ければ黙って開かないだけなので
+# 誰も気づかない（実際 open_md.pyw → open_file.pyw の改名で一度壊れた。
+# その後 Twitter-like-char-counter → croco-editor への書き直しでも
+# この参照の更新漏れが起きた。2026-09-11）。
 # エディタごと入っていない環境ではクロコの問題ではないので、そこは見逃す。
 if cfg.editor_path.parent.is_dir():
     check(f"エディタの既定パスが実在する（{cfg.editor_path.name}）",
@@ -710,8 +755,8 @@ _deny = _settings["permissions"]["deny"]
 # Edit(...) が全ての書き込み系ツールを覆うので、守りたいパスは必ず Edit で書くこと。
 check("Write(...)のdenyを書かない（効かない）",
       [r for r in _deny if r.startswith("Write(")], [])
-for _path in ("**/クロコ本体/**", "**/下書き/**", "**/.croco/**", "**/.env",
-              "**/.claude/**", "**/.ssh/**"):
+for _path in ("//**/クロコ本体/**", "//**/下書き/**", "//**/.croco/**", "//**/.env",
+              "//**/.claude/**", "//**/.ssh/**"):
     check(f"deny: Edit({_path})", f"Edit({_path})" in _deny, True)
 check("deny: 公開はクロコの仕事ではない",
       all(r in _deny for r in ("Bash(git push*)", "Bash(gh *)")), True)
@@ -773,9 +818,20 @@ check("再開: 保留理由が空でも付けない",
 built = _dispatch.PROMPT_TEMPLATE.format(
     page_id="pid", title="T", body="B", progress="P",
     resumed_note=note, related_note="", projects_dir="C:/proj", cli_path="C:/cli.py",
+    proceed_note=_dispatch._PROCEED_INTERACTIVE, review_hint=_dispatch._REVIEW_HINT_INTERACTIVE,
 )
 check("実装プロンプト: 相談済みの但し書きが入る", "相談済み" in built, True)
 check("実装プロンプト: 未展開の差し込みが残っていない", "{" in built.replace("{page_id}", ""), False)
+check("実装プロンプト: 対話モードはその場で聞けと言っている", "その場で本人に聞いてください" in built, True)
+
+built_headless = _dispatch.PROMPT_TEMPLATE.format(
+    page_id="pid", title="T", body="B", progress="P",
+    resumed_note=note, related_note="", projects_dir="C:/proj", cli_path="C:/cli.py",
+    proceed_note=_dispatch._PROCEED_HEADLESS, review_hint="",
+)
+check("実装プロンプト: 非対話モードはreviewに回せと言っている", "`review` に回してください" in built_headless, True)
+check("実装プロンプト: 非対話モードでは未展開の差し込みが残っていない",
+      "{" in built_headless.replace("{page_id}", ""), False)
 
 # --- Notion のブロック変換 ---------------------------------------------------
 _long = "あ" * (nt.RICH_TEXT_LIMIT * nt.RICH_TEXT_PARTS + 1)
@@ -898,10 +954,7 @@ check("改修依頼: 本文が取れなくても落ちない",
 check("改修依頼: 0件のときは空でない一文",
       _backlog.format_items([], {}).strip() != "", True)
 
-# --- 関連アイテムの提示（croco/related.py） ---------------------------------------
-from croco import related as _related  # noqa: E402
-
-
+# --- 由来メモ・catalog_related.py/dedupe.py 共通のテスト用フィクスチャ ------------------
 def rel_item(id_, title, status=inbox.STATUS_TODO, reason=inbox.HOLD_NONE):
     return inbox.InboxItem({
         "id": id_,
@@ -912,56 +965,6 @@ def rel_item(id_, title, status=inbox.STATUS_TODO, reason=inbox.HOLD_NONE):
             inbox.P_HOLD_REASON: {"select": {"name": reason}},
         },
     })
-
-
-check("related: 候補なしは空文字列", _related.render_section([], allow_review=False), "")
-
-_section_dispatch = _related.render_section(
-    [rel_item("r1", "先週の続き", status=inbox.STATUS_REVIEW, reason=inbox.HOLD_JUDGEMENT)],
-    allow_review=False,
-)
-check("related: dispatchでは要確認に触るなと言う", "着手せず本人に伝えるだけ" in _section_dispatch, True)
-check("related: idが載る", "r1" in _section_dispatch, True)
-
-_section_consult = _related.render_section(
-    [rel_item("r2", "関連メモ", status=inbox.STATUS_REVIEW, reason=inbox.HOLD_JUDGEMENT)],
-    allow_review=True,
-)
-check("related: consultでは要確認でも制限しない", "着手せず本人に伝えるだけ" in _section_consult, False)
-
-
-class _BoomNotion:
-    def resolve_data_source_id(self, database_id):
-        raise RuntimeError("boom")
-
-
-class _BoomConfig:
-    inbox_data_source_id = ""
-    inbox_database_id = "db"
-
-
-_warn_lines = []
-_saved_warn = _log.warn
-_log.warn = _warn_lines.append
-try:
-    _boom_result = _related.find_candidates(
-        _BoomNotion(), object(), _BoomConfig(),
-        current_id="x", current_title="T", current_body="B",
-    )
-finally:
-    _log.warn = _saved_warn
-check("related: Notion側が失敗しても空リストで返す（本体を止めない）", _boom_result, [])
-check("related: 失敗を警告に残す", any("関連アイテム" in line for line in _warn_lines), True)
-
-
-class _FakeGemini:
-    def __init__(self, related_ids):
-        self._related_ids = related_ids
-        self.called_with = None
-
-    def find_related(self, title, body, candidates):
-        self.called_with = (title, body, candidates)
-        return self._related_ids
 
 
 class _CandidatesNotion:
@@ -999,19 +1002,218 @@ def make_page(id_, title, status=inbox.STATUS_TODO, kind="アイデア", reason=
     return {"id": id_, "created_time": created, "properties": props}
 
 
-_pages2 = [make_page("self", "現在のやつ"), make_page("other", "関連候補")]
-_notion2 = _CandidatesNotion(_pages2, {"self": "本人本文", "other": "関連本文"})
-_fake_gemini = _FakeGemini(["other"])
-_found = _related.find_candidates(
-    _notion2, _fake_gemini, _CandConfig(),
-    current_id="self", current_title="現在のやつ", current_body="本人本文",
-)
+# --- 台帳フォルダの関連提示（croco/catalog_related.py） -----------------------------
+from croco import catalog_related as _catalog_related  # noqa: E402
+
 check(
-    "related: 自分自身は候補から除いてGeminiに渡す",
-    all(c["id"] != "self" for c in _fake_gemini.called_with[2]),
+    "catalog_related: 候補なしは空文字列",
+    _catalog_related.render_section([]),
+    "",
+)
+_cr_section = _catalog_related.render_section(["下書き", "受験"])
+check("catalog_related: フォルダ名が載る", "下書き" in _cr_section and "受験" in _cr_section, True)
+check(
+    "catalog_related: 台帳コマンドの案内を含む",
+    "catalog_cli.py" in _cr_section,
     True,
 )
-check("related: geminiが選んだものだけ返す", [i.id for i in _found], ["other"])
+
+
+class _FakeFolderGemini:
+    def __init__(self, folders):
+        self._folders = folders
+        self.called_with = None
+
+    def find_related_folders(self, title, body, candidates):
+        self.called_with = (title, body, candidates)
+        return self._folders
+
+
+_saved_folder_lore_index = _catalog_related.catalog_db.folder_lore_index
+_catalog_related.catalog_db.folder_lore_index = lambda: [
+    ("下書き", "本人名義の原稿置き場"),
+    ("空lore", None),
+    ("受験", "受験関連の入口"),
+]
+try:
+    _fake_folder_gemini = _FakeFolderGemini(["受験"])
+    _cr_found = _catalog_related.find_candidates(
+        _fake_folder_gemini, current_title="T", current_body="B"
+    )
+finally:
+    _catalog_related.catalog_db.folder_lore_index = _saved_folder_lore_index
+check(
+    "catalog_related: loreが空のフォルダは候補から除く",
+    all(c["folder"] != "空lore" for c in _fake_folder_gemini.called_with[2]),
+    True,
+)
+check("catalog_related: geminiが選んだフォルダだけ返す", _cr_found, ["受験"])
+
+
+def _boom_folder_lore_index():
+    raise RuntimeError("boom")
+
+
+_saved_folder_lore_index = _catalog_related.catalog_db.folder_lore_index
+_catalog_related.catalog_db.folder_lore_index = _boom_folder_lore_index
+_warn_lines2 = []
+_saved_warn2 = _log.warn
+_log.warn = _warn_lines2.append
+try:
+    _cr_boom_result = _catalog_related.find_candidates(
+        object(), current_title="T", current_body="B"
+    )
+finally:
+    _catalog_related.catalog_db.folder_lore_index = _saved_folder_lore_index
+    _log.warn = _saved_warn2
+check("catalog_related: 台帳側が失敗しても空リストで返す（本体を止めない）", _cr_boom_result, [])
+check("catalog_related: 失敗を警告に残す", any("台帳フォルダ" in line for line in _warn_lines2), True)
+
+# --- README.mdのあるフォルダの索引（catalog_db.readme_folder_index / catalog_cli index） ---
+import gc  # noqa: E402
+
+import catalog_cli as _catalog_cli  # noqa: E402
+import catalog_db as _catalog_db  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    _idx_root = Path(tmp).resolve()
+    _saved_db_path, _saved_projects_root = _catalog_db.DB_PATH, _catalog_db.PROJECTS_ROOT
+    _catalog_db.DB_PATH = _idx_root / "catalog.db"
+    _catalog_db.PROJECTS_ROOT = _idx_root / "管轄"
+    try:
+        _top_readme = _idx_root / "管轄" / "案件A" / "README.md"
+        _sub_readme = _idx_root / "管轄" / "案件A" / "sub" / "README.md"
+        _out_readme = _idx_root / "外側" / "README.md"
+        _named_readme = _idx_root / "外側" / "別名_README.md"
+        _gone_readme = _idx_root / "消えた" / "README.md"
+        for _p in (_top_readme, _sub_readme, _out_readme, _named_readme):
+            _p.parent.mkdir(parents=True, exist_ok=True)
+            _p.write_text("x", encoding="utf-8")
+        _idx_conn = _catalog_db.connect()
+        with _idx_conn:
+            for _p, _lore in [
+                (_top_readme, "直下のlore"),
+                (_sub_readme, None),
+                (_out_readme, "外のlore"),
+                (_named_readme, "別名"),
+                (_gone_readme, "消えた"),
+            ]:
+                _idx_conn.execute(
+                    "INSERT INTO items (path, lore, updated_at) VALUES (?, ?, ?)",
+                    (str(_p), _lore, "t"),
+                )
+        _idx_conn.close()
+        _rfi = dict(_catalog_db.readme_folder_index())
+        _idx_buf = io.StringIO()
+        with contextlib.redirect_stdout(_idx_buf):
+            _catalog_cli.cmd_index(None)
+        _idx_out = _idx_buf.getvalue()
+    finally:
+        _catalog_db.DB_PATH, _catalog_db.PROJECTS_ROOT = _saved_db_path, _saved_projects_root
+        # catalog_dbは接続を明示的に閉じないため、一時フォルダを消す前に回収してファイルを離させる
+        gc.collect()
+check(
+    "readme_folder_index: 実在するREADME.mdのフォルダを場所を問わず出し、実在しないもの・別名は除く",
+    _rfi,
+    {
+        str(_top_readme.parent): "直下のlore",
+        str(_sub_readme.parent): None,
+        str(_out_readme.parent): "外のlore",
+    },
+)
+check("index: 直下のフォルダは名前だけで出す", "- 案件A: 直下のlore" in _idx_out, True)
+check("index: 直下以外は絶対パスで出し、lore未設定も表示する", f"- {_sub_readme.parent}: (lore未設定)" in _idx_out, True)
+check(
+    "index: 直下の一覧を先に出す",
+    _idx_out.index("クロコ管轄プロジェクト直下:") < _idx_out.index("その他（絶対パス）:"),
+    True,
+)
+
+# --- 由来メモの兄弟アイテム提示（croco/siblings.py） --------------------------------
+from croco import siblings as _siblings  # noqa: E402
+
+check(
+    "siblings: origin_keyはページIDだけを正規化して取り出す",
+    _siblings.origin_key("元メモ (3df1d782-3111-817c-8885-fcce3d5e00f2)"),
+    "3df1d7823111817c8885fcce3d5e00f2",
+)
+check("siblings: IDが無ければ空文字", _siblings.origin_key("由来不明のメモ"), "")
+check("siblings: 空文字なら空文字", _siblings.origin_key(""), "")
+
+check("siblings: 候補なしは空文字列", _siblings.render_section([]), "")
+_sib_section = _siblings.render_section(
+    [rel_item("s1", "兄弟A"), rel_item("s2", "兄弟B", status=inbox.STATUS_DONE)]
+)
+check("siblings: idが載る", "s1" in _sib_section and "s2" in _sib_section, True)
+check("siblings: 完了済みはステータス注記が付く", "［完了］" in _sib_section, True)
+
+
+class _SiblingNotion:
+    def __init__(self, pages):
+        self._pages = pages
+
+    def resolve_data_source_id(self, database_id):
+        return "ds"
+
+    def query_data_source(self, data_source_id, *, filter_=None, sorts=None):
+        return self._pages
+
+
+def make_origin_page(id_, title, origin):
+    return {
+        "id": id_,
+        "properties": {
+            inbox.P_TITLE: {"title": [{"plain_text": title}]},
+            inbox.P_STATUS: {"select": {"name": inbox.STATUS_TODO}},
+            inbox.P_KIND: {"select": {"name": "アイデア"}},
+            inbox.P_HOLD_REASON: {"select": {"name": inbox.HOLD_NONE}},
+            inbox.P_ORIGIN: {"rich_text": [{"plain_text": origin}]},
+        },
+    }
+
+
+_origin_pages = [
+    make_origin_page("self", "現在のやつ", "元メモ (3df1d782-3111-817c-8885-fcce3d5e00f2)"),
+    make_origin_page("sib", "兄弟", "元メモ (3df1d782-3111-817c-8885-fcce3d5e00f2)"),
+    make_origin_page("other", "無関係", "別メモ (11111111-1111-1111-1111-111111111111)"),
+]
+_sib_found = _siblings.find_siblings(
+    _SiblingNotion(_origin_pages),
+    _CandConfig(),
+    current_id="self",
+    current_origin="元メモ (3df1d782-3111-817c-8885-fcce3d5e00f2)",
+)
+check("siblings: 自分自身は含めない", all(i.id != "self" for i in _sib_found), True)
+check("siblings: 同じ由来メモだけ拾う", [i.id for i in _sib_found], ["sib"])
+
+check(
+    "siblings: 由来メモが空なら空リスト（他へ巻き込まない）",
+    _siblings.find_siblings(
+        _SiblingNotion(_origin_pages), _CandConfig(), current_id="self", current_origin=""
+    ),
+    [],
+)
+
+
+class _BoomSiblingNotion:
+    def resolve_data_source_id(self, database_id):
+        raise RuntimeError("boom")
+
+
+_warn_lines3 = []
+_saved_warn3 = _log.warn
+_log.warn = _warn_lines3.append
+try:
+    _sib_boom_result = _siblings.find_siblings(
+        _BoomSiblingNotion(),
+        _CandConfig(),
+        current_id="self",
+        current_origin="元メモ (3df1d782-3111-817c-8885-fcce3d5e00f2)",
+    )
+finally:
+    _log.warn = _saved_warn3
+check("siblings: Notion側が失敗しても空リストで返す（本体を止めない）", _sib_boom_result, [])
+check("siblings: 失敗を警告に残す", any("由来メモ兄弟" in line for line in _warn_lines3), True)
 
 # --- 優先度（croco/inbox.py: priority_rank） -------------------------------------
 check("priority_rank: 高", inbox.priority_rank(inbox.PRIORITY_HIGH), 0)
@@ -1400,10 +1602,10 @@ check("由来メモ: 未設定は空文字",
       inbox.InboxItem({"id": "x", "properties": {}}).origin, "")
 
 check("origin_key: IDだけを取り出して正規化する（ダッシュ除去・小文字化）",
-      croco_cli._origin_key("題 (AAaaAAaa-1111-2222-3333-444444444444)"),
+      _siblings.origin_key("題 (AAaaAAaa-1111-2222-3333-444444444444)"),
       "aaaaaaaa" + "1111" + "2222" + "3333" + "4" * 12)
-check("origin_key: IDが無ければ空", croco_cli._origin_key("題だけ"), "")
-check("origin_key: 空文字も空", croco_cli._origin_key(""), "")
+check("origin_key: IDが無ければ空", _siblings.origin_key("題だけ"), "")
+check("origin_key: 空文字も空", _siblings.origin_key(""), "")
 
 # --- B: done カスケード（同一メモ由来をまとめて完了） -----------------------------
 _ORIGIN_A = "メモA (aaaaaaaa-1111-2222-3333-444444444444)"

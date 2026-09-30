@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 
 from .config import CROCO_HOME, Config
-from . import inbox, log, notify, related
+from . import catalog_related, inbox, log, notify, siblings
 from . import notion as nt
 from .dispatch import launch_claude, open_editor, read_line
 from .gemini import Gemini
@@ -187,8 +187,14 @@ def run(config: Config, item: inbox.InboxItem) -> bool:
         thinking_level=config.gemini_thinking_level,
         temperature=config.gemini_temperature,
     )
-    candidates = related.find_candidates(
-        client, gemini, config, current_id=item.id, current_title=item.title, current_body=body,
+    catalog_folders = catalog_related.find_candidates(
+        gemini, current_title=item.title, current_body=body
+    )
+    sibling_items = siblings.find_siblings(
+        client, config, current_id=item.id, current_origin=item.origin
+    )
+    related_note = siblings.render_section(sibling_items) + catalog_related.render_section(
+        catalog_folders
     )
     prompt = PROMPT_TEMPLATE.format(
         page_id=item.id,
@@ -197,7 +203,7 @@ def run(config: Config, item: inbox.InboxItem) -> bool:
         body=body,
         progress=item.result_log.strip() or "（ありません）",
         reason_note=reason_note,
-        related_note=related.render_section(candidates, allow_review=True),
+        related_note=related_note,
         cli_path=CROCO_HOME / "croco_cli.py",
         projects_dir=config.projects_dir,
     )

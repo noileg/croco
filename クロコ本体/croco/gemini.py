@@ -149,32 +149,34 @@ SYSTEM_INSTRUCTION = """\
 - 何を作るべきか、どう実装すべきかを考えない。それは後工程の仕事。
 """
 
-# 関連度判定用のスキーマ。分割によってDB上は別行になっていても、本人の頭の中では
-# 地続きの話であることが普通にある（2026-07-30、本人の指摘）。クロコは面倒がって
-# 自発的に横断を探しには行かないため、判定済みの候補を最初からプロンプトに書く。
-RELATED_SCHEMA = {
+# フォルダ関連度判定用のスキーマ。台帳(catalog.db)のトップレベルフォルダが対象
+# （2026-09-17、本人の設計：「すべてのフォルダにREADME以下の情報の索引用の情報を
+# それこそ台帳でフォルダのloreとして持たせてそれをGeminiに読み込ませればいい。
+# その上で関連性を判断してフォルダなし具体ファイル名などを挙げればいい」）。
+FOLDER_RELATED_SCHEMA = {
     "type": "object",
     "properties": {
-        "related_ids": {
+        "related_folders": {
             "type": "array",
             "description": (
-                "新しいアイテムと実質的に関連する既存アイテムのIDだけを返す。"
+                "新しいタスクと実質的に関連する既存フォルダの名前だけを返す。"
                 "表現が似ている・テーマが漠然と近いだけのものは含めない。"
-                "同じ取り組み・同じプロジェクトの続き、明確な依存・参照関係がある場合だけ選ぶ。"
+                "同じ取り組みの続き、明確な依存・参照関係、前提を共有する場合だけ選ぶ。"
                 "迷ったら含めない。関連が無ければ空配列。"
             ),
             "items": {"type": "string"},
         }
     },
-    "required": ["related_ids"],
+    "required": ["related_folders"],
 }
 
-RELATED_SYSTEM_INSTRUCTION = """\
-あなたは、新しいメモが既存アイテム群のどれと実質的に関連するかを判定するだけの処理系です。
+FOLDER_RELATED_SYSTEM_INSTRUCTION = """\
+あなたは、新しいタスクが台帳(catalog.db)上の既存フォルダ群のどれと実質的に
+関連するかを判定するだけの処理系です。
 
 厳守すること:
-- 関連の有無だけを判定する。実装方針やアイデアの中身の評価はしない。
-- 表面的なキーワードの一致ではなく、同じ取り組み・同じプロジェクトの続きかどうかで判断する。
+- 関連の有無だけを判定する。実装方針やタスクの中身の評価はしない。
+- 表面的なキーワードの一致ではなく、同じ取り組み・同じ前提・依存関係で判断する。
 - 迷ったら含めない。過剰に拾うと、無関係な文脈が後工程に混ざる。
 """
 
@@ -325,42 +327,35 @@ class Gemini:
         )
         return _parse_items(response)
 
-    def find_related(
+    def find_related_folders(
         self, current_title: str, current_body: str, candidates: list[dict]
     ) -> list[str]:
-        """既存アイテム群のうち、現在のアイテムと関連するものだけをidで返す。
+        """台帳(catalog.db)上の既存フォルダ群のうち、現在のタスクと関連するものを名前で返す。
 
-        候補には本文（body）まで含めて渡す。タイトルは意味解釈しない短いラベルに
-        留める設計（本モジュール冒頭のdocstring参照）なので、関連判定の材料としては薄い。
-        呼び出し失敗（ネットワーク等）はここでは吸収しない。呼び出し元が
-        「関連候補なしで通常どおり進める」形で吸収する（分割・登録本体を巻き込まないため）。
+        候補は {"folder": フォルダ名, "lore": lore文字列} のリスト（呼び出し元でlore未設定を
+        除外して渡す想定。空のloreは判定材料にならないため）。find_related と同じく、
+        呼び出し失敗はここでは吸収しない（呼び出し元のcatalog_related.pyが
+        「関連候補なしで通常どおり進める」形で吸収し、本体のdispatch/consultを巻き込まない）。
         """
         if not candidates:
             return []
 
-        blocks = []
-        for c in candidates:
-            blocks.append(
-                f"- id: {c['id']}\n"
-                f"  タイトル: {c['title']}\n"
-                f"  種別: {c['kind']} / ステータス: {c['status']}\n"
-                f"  本文: {c['body']}"
-            )
+        blocks = [f"- フォルダ: {c['folder']}\n  lore: {c['lore']}" for c in candidates]
         prompt = (
-            f"## 新しいアイテム\nタイトル: {current_title}\n本文: {current_body}\n\n"
-            "## 既存アイテム一覧\n" + "\n".join(blocks)
+            f"## 新しいタスク\nタイトル: {current_title}\n本文: {current_body}\n\n"
+            "## 台帳上の既存フォルダ一覧\n" + "\n".join(blocks)
         )
 
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "systemInstruction": {"parts": [{"text": RELATED_SYSTEM_INSTRUCTION}]},
+            "systemInstruction": {"parts": [{"text": FOLDER_RELATED_SYSTEM_INSTRUCTION}]},
             "generationConfig": {
                 "temperature": self._temperature,
                 "thinkingConfig": {"thinkingLevel": self._thinking_level},
                 "responseFormat": {
                     "text": {
                         "mimeType": "APPLICATION_JSON",
-                        "schema": RELATED_SCHEMA,
+                        "schema": FOLDER_RELATED_SCHEMA,
                     }
                 },
             },
@@ -372,8 +367,8 @@ class Gemini:
             headers={"x-goog-api-key": self._api_key},
             payload=payload,
         )
-        valid_ids = {c["id"] for c in candidates}
-        return _parse_related(response, valid_ids=valid_ids)
+        valid_folders = {c["folder"] for c in candidates}
+        return _parse_related_folders(response, valid_folders=valid_folders)
 
     def find_duplicate_schedule(
         self, title: str, body: str, scheduled_date: str, candidates: list[dict]
@@ -527,11 +522,11 @@ def _parse_duplicate(response: dict, *, valid_ids: set[str]) -> str:
     return dup_id
 
 
-def _parse_related(response: dict, *, valid_ids: set[str]) -> list[str]:
-    """レスポンスから related_ids を取り出す。壊れていれば空扱いにする。
+def _parse_related_folders(response: dict, *, valid_folders: set[str]) -> list[str]:
+    """レスポンスから related_folders を取り出す。壊れていれば空扱いにする。
 
-    _parse_items と違い、ここは補助機能（無くても本体のdispatch/consultは動く）
-    なので、壊れたレスポンスで例外を投げず空リストに倒す。
+    補助機能（無くても本体のdispatch/consultは動く）なので、
+    壊れたレスポンスで例外を投げず空リストに倒す。
     """
     candidates = response.get("candidates") or []
     if not candidates:
@@ -544,11 +539,11 @@ def _parse_related(response: dict, *, valid_ids: set[str]) -> list[str]:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return []
-    ids = parsed.get("related_ids")
-    if not isinstance(ids, list):
+    folders = parsed.get("related_folders")
+    if not isinstance(folders, list):
         return []
-    # 存在しないIDを返してくることに備え、候補集合と突き合わせて弾く。
-    return [i for i in ids if isinstance(i, str) and i in valid_ids]
+    # 存在しないフォルダ名を返してくることに備え、候補集合と突き合わせて弾く。
+    return [f for f in folders if isinstance(f, str) and f in valid_folders]
 
 
 def _parse_items(response: dict) -> list[dict]:

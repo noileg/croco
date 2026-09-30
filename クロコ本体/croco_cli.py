@@ -16,6 +16,7 @@ Notion の資格情報をクロコのコンテキストに載せずに済み、
     python croco_cli.py show     <page_id>
     python croco_cli.py tree
     python croco_cli.py read     <page_id>
+    python croco_cli.py new      <未処理|親page_id> <タイトル> [本文|-]
 
 tree / read は、クロコ用の親ページ配下（Inbox DB以外の子ページも含む）を
 閲覧するための読み取り専用コマンド。list/show と同じ境界の考え方で、
@@ -24,10 +25,11 @@ tree / read は、クロコ用の親ページ配下（Inbox DB以外の子ペー
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 
-from croco import inbox, notify, notion as nt
+from croco import inbox, notify, notion as nt, siblings
 from croco.config import Config, ConfigError
 
 # 節目で鳴らす音。ここで鳴らすのは run_croco.py 側では間に合わないため。
@@ -49,6 +51,9 @@ SOUNDS = {
 # 判断し直接完了できるようにした。どの状態から完了したかはログに残す。
 AUTO_RESUME_ON_DONE_STATUSES = {inbox.STATUS_REVIEW, inbox.STATUS_EXCLUDED}
 
+# Git Bash(MSYS)が "/" 始まりの引数を書き換えたときの接頭辞（new の検査用）。
+MSYS_ROOT_PREFIXES = ("C:/Program Files/Git/", "C:/Program Files (x86)/Git/")
+
 # list/show の本文冒頭に添える抜粋の長さ。要約はしない（逐語の先頭を切るだけ）。
 EXCERPT_LEN = 60
 
@@ -64,24 +69,6 @@ def _append_log(client: nt.Notion, page_id: str, message: str) -> str:
     stamp = inbox.now_iso()[:16].replace("T", " ")
     entry = f"[{stamp}] {message}"
     return f"{existing}\n{entry}".strip() if existing else entry
-
-
-_ORIGIN_ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?"
-    r"[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}"
-)
-
-
-def _origin_key(origin: str) -> str:
-    """「由来メモ」文字列から、突き合わせ用のページIDを取り出して正規化する。
-
-    値は `タイトル (ページID)` 形式だが、一致判定に使うのはIDだけ
-    （タイトルは読みやすさ用の飾り）。IDが見当たらなければ空文字を返し、
-    呼び出し側はカスケードしない（この改修より前の既存アイテムや、手書きの
-    由来メモで、無関係なものを誤って巻き込むのを防ぐ）。
-    """
-    match = _ORIGIN_ID_RE.search(origin or "")
-    return match.group(0).replace("-", "").lower() if match else ""
 
 
 def _cascade_done_to_siblings(
@@ -102,7 +89,7 @@ def _cascade_done_to_siblings(
     origin = nt.plain_text_of(
         client.get_page(done_page_id).get("properties", {}).get(inbox.P_ORIGIN)
     )
-    key = _origin_key(origin)
+    key = siblings.origin_key(origin)
     if not key:
         return
 
@@ -114,7 +101,7 @@ def _cascade_done_to_siblings(
         sibling = inbox.InboxItem(page)
         if sibling.id == done_page_id or sibling.status == inbox.STATUS_DONE:
             continue
-        if _origin_key(sibling.origin) != key:
+        if siblings.origin_key(sibling.origin) != key:
             continue
         updated = _append_log(
             client,
@@ -268,7 +255,80 @@ def _cmd_genre(client: nt.Notion, page_id: str, value: str) -> int:
     return 0
 
 
+def _cmd_new(client: nt.Notion, config: Config, args: list[str]) -> int:
+    """ページを直接作る。親は「未処理」（未処理置き場）かページID。
+
+    「未処理置き場」に作れば、次回の捕捉フェーズでGeminiが話題ごとに分割して
+    Inboxへ取り込む（スマホからNotion AIチャットで入れたものと同じ扱い）。
+    それ以外のページIDを親にすれば、その配下に置くだけで取り込み対象にはならない。
+    本文が "-" なら標準入力から読む（長文・複数行はこちら）。
+    """
+    if len(args) < 2:
+        print("使い方: new <未処理|親page_id> <タイトル> [本文|-]", file=sys.stderr)
+        return 2
+    parent, title = args[0], args[1]
+    body = " ".join(args[2:]) if len(args) > 2 else ""
+    # Git Bash(MSYS)は "/" で始まる引数をPythonに渡す前にWindowsパスへ書き換える
+    # （"/exit" → "C:/Program Files/Git/exit"）。Python側では元に戻せず、気付かず
+    # Notionへ書くと壊れた本文が残る。書き換えの痕跡があれば書き込まずに止める。
+    # "/tmp/x" → "C:/Users/.../Temp/x" のように行き先が変わる変換は接頭辞で
+    # 当てられないため、Git Bash上(MSYSTEMあり)では「X:/」始まりの引数も疑う。
+    # 本当にWindowsパスで始まる本文でも止まるが、黙って壊すより止める側に倒す
+    # （その場合は "-" か MSYS_NO_PATHCONV=1 で回避できる）。
+    # "/" 始まりの本文は "-"（標準入力）で渡すか MSYS_NO_PATHCONV=1 を付ける。
+    in_msys = bool(os.environ.get("MSYSTEM"))
+    for label, text in (("親", parent), ("タイトル", title), ("本文", body)):
+        if text.startswith(MSYS_ROOT_PREFIXES) or (
+            in_msys and re.match(r"[A-Za-z]:/", text)
+        ):
+            print(
+                f"{label}がGit Bashのパス変換で書き換えられた形跡があります: {text[:60]}\n"
+                "本文は '-'（標準入力・ヒアドキュメント）で渡すか、"
+                "MSYS_NO_PATHCONV=1 を付けて再実行してください。何も作っていません。",
+                file=sys.stderr,
+            )
+            return 2
+    if body == "-":
+        # BOM付き（メモ帳・PowerShell 5.1の出力等）でも先頭に ﻿ を残さない。
+        try:
+            body = sys.stdin.buffer.read().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            print(
+                "標準入力がUTF-8ではありません（PowerShell 5.1のパイプ等は"
+                "$OutputEncodingを確認）。文字化けした本文は送りません。",
+                file=sys.stderr,
+            )
+            return 2
+        # CRLFの \r を本文に残さない（Notionに送ると行末に紛れ込む）。
+        body = body.replace("\r\n", "\n").replace("\r", "\n")
+    if not title:
+        print("タイトルが空です。", file=sys.stderr)
+        return 2
+
+    parent_id = config.unprocessed_page_id if parent == "未処理" else parent
+    blocks = nt.paragraph_blocks(body) if body else []
+    # Notionは1リクエストのchildrenが100件まで。超えた分は追記で足す。
+    page = client.create_child_page(
+        parent_page_id=parent_id, title=title, children=blocks[:100] or None
+    )
+    for i in range(100, len(blocks), 100):
+        client.append_blocks(page["id"], blocks[i : i + 100])
+    print(f"作成しました: {title}\t{page['id']}")
+    if page.get("url"):
+        print(page["url"])
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    # PYTHONUTF8 なしだと標準出力がcp932になり、絵文字などを含むタイトルの表示で
+    # UnicodeEncodeError になる。`new` ではページ作成後の表示で落ちるため、
+    # 成功したのに失敗扱いで再実行され二重作成になる。出力はUTF-8に固定し、
+    # 表せない文字が来ても落とさない。
+    for stream in (sys.stdout, sys.stderr):
+        # テストが StringIO に差し替えている場合は reconfigure を持たない。
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2
@@ -295,6 +355,8 @@ def main(argv: list[str]) -> int:
             return 2
         value = argv[2] if len(argv) > 2 else ""
         return _cmd_genre(client, argv[1], value)
+    if argv[0] == "new":
+        return _cmd_new(client, config, argv[1:])
     if argv[0] == "tree":
         return _cmd_tree(client, config)
     if argv[0] == "read":

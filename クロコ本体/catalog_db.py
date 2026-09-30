@@ -207,6 +207,79 @@ def get_item(path: str) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM items WHERE path = ?", (path,)).fetchone()
 
 
+def find_by_basename(path: str) -> list[str]:
+    """同じファイル名（拡張子込み、パス除く）を持つ他のitemsを探す。
+
+    新規ファイル作成時、複製・専用化（[[feedback_copy_dont_regenerate_long_files]]の
+    ような運用）で生まれた既存の同名ファイルに気づかせるための検索。パス自体は除く。
+    """
+    name = Path(path).name
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT path FROM items WHERE path != ? AND path LIKE '%' || ? ESCAPE '\\'",
+            (path, name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")),
+        ).fetchall()
+    # LIKEの部分一致は末尾一致まで保証しないため、basenameが完全一致するものだけに絞る
+    return [r[0] for r in rows if Path(r[0]).name == name]
+
+
+def is_project_readme(path: str) -> bool:
+    """クロコ管轄プロジェクト直下フォルダ自身のREADME.mdかどうか。
+
+    `folder_lore_index()`が対象とする行と同じ条件（新規フォルダ検出フックとの
+    重複判定を避けるため関数化、2026-09-19）。
+    """
+    try:
+        rel = Path(path).resolve().relative_to(PROJECTS_ROOT)
+    except (OSError, ValueError):
+        return False
+    return len(rel.parts) == 2 and rel.parts[1] == "README.md"
+
+
+def folder_lore_index() -> list[tuple[str, str | None]]:
+    """クロコ管轄プロジェクト直下のトップレベルフォルダ名と、そのREADME.mdのloreを列挙する。
+
+    新規フォルダを作る前に「既存プロジェクトと関連しないか」をコンパクトに確認するための索引
+    （2026-09-17、本人の設計）。フォルダ単位の意味は、そのフォルダのREADME.mdのloreに
+    要約を1〜3文で置く運用で表す（列自体はitemsのlore列を流用、スキーマ変更は無い）。
+    loreが未設定のフォルダも一覧に含める（埋め忘れが見える方が良いため）。
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT path, lore FROM items WHERE path LIKE ? ORDER BY path",
+            (str(PROJECTS_ROOT) + "\\%\\README.md",),
+        ).fetchall()
+    result = []
+    for path, lore in rows:
+        if not is_project_readme(path):
+            continue
+        rel = Path(path).resolve().relative_to(PROJECTS_ROOT)
+        result.append((rel.parts[0], lore))
+    return result
+
+
+def readme_folder_index() -> list[tuple[str, str | None]]:
+    """README.mdを持つフォルダの絶対パスと、そのREADME.mdのloreを場所を問わず列挙する。
+
+    フォルダ横断で探す場所を絞るための索引。フォルダの意味はREADME.mdのloreで表す運用の
+    ため、README.mdを持たないフォルダ（環境を入れておくだけのフォルダ等）は対象にしない。
+    README.mdの有無は台帳への登録で判定し、ファイルシステムは走査しない（走査すると
+    node_modules等の他人のREADMEまで拾い、根をどこに置くかも決め打ちになるため）。
+    その代わり、Claude Codeで一度も触れていないREADME.mdは載らない。
+    登録済みでも実在しないものは除く（移動・削除済みの場所を探す先として示さないため）。
+    loreが未設定のフォルダも含める（埋め忘れが見える方が良く、パスだけでも手がかりになるため）。
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT path, lore FROM items WHERE path LIKE '%README.md' ORDER BY path"
+        ).fetchall()
+    return [
+        (str(Path(path).parent), lore)
+        for path, lore in rows
+        if Path(path).name == "README.md" and Path(path).exists()
+    ]
+
+
 def get_relations(node_id: str) -> list[sqlite3.Row]:
     """node_idがfrom/toどちらに立っていても、両方向まとめて返す。
 

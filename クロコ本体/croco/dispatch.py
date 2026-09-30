@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .config import CROCO_HOME, Config
-from . import inbox, log, related, usage
+from . import catalog_related, inbox, log, siblings, usage
 from . import notion as nt
 from .gemini import Gemini
 
@@ -50,10 +50,7 @@ PROMPT_TEMPLATE = """\
 あなたは「クロコ」として、Notionに溜まったアイデアを実装するために自動で起動されました。
 以下のアイデアの実装を、可能なところまで自分で進めてください。
 
-本人はこの画面を見ているかもしれませんし、離れているかもしれません。
-**返事を待たずに自分で進めてください。** ただし途中で本人から方針の修正や
-追加の指示が入ることがあります。その場合はそちらを優先してください。
-
+{proceed_note}
 ## 対象アイテム
 - Notionページ ID: {page_id}
 - タイトル: {title}
@@ -107,7 +104,7 @@ python "{cli_path}" log {page_id} "やったことの要約（理由があれば
 python "{cli_path}" done {page_id} "最終的な成果の要約"
 ```
 
-自分では判断できず本人の確認が必要になったら:
+{review_hint}自分では判断できず本人の確認が必要になったら:
 ```
 python "{cli_path}" review {page_id} "何を確認してほしいか"
 ```
@@ -141,7 +138,7 @@ python "{cli_path}" review {page_id} "何を確認してほしいか"
 ## 進め方
 - 1回の起動で全部終わらせる必要はありません。中断しても次回の起動で続きから再開できます。
 - 終わらない場合も、必ず `log` で進捗を残してから終了してください。次回のあなたはそれだけを頼りに再開します。
-- 不明点があって進めない場合は、勝手に仕様を決めず `review` に回してください。
+- 不明点があって進めない場合は、勝手に仕様を決めないでください。
 """
 
 
@@ -359,12 +356,29 @@ def _mark_started(
     client.update_page(item.id, properties)
 
 
+_PROCEED_INTERACTIVE = """\
+**実装するに足る内容が揃っているなら、確認を挟まずそのまま実装を進めてください。**
+内容が練られておらず実装方針を決めきれない箇所があれば、仮決めして進めず
+**その場で本人に聞いてください。** 本人は基本的に画面の前にいます。
+途中で本人から方針の修正や追加の指示が入ることもあります。その場合はそちらを優先してください。
+"""
+
+_PROCEED_HEADLESS = """\
+**実装するに足る内容が揃っているなら、確認を挟まずそのまま実装を進めてください。**
+内容が練られておらず実装方針を決めきれない箇所があれば、仮決めして進めず
+`review` に回してください。
+"""
+
+_REVIEW_HINT_INTERACTIVE = """\
+練られていないだけなら、先にその場で聞いてください。review は反応が無いときと、
+下の「着手してはいけないもの」に該当するときに使います。
+
+"""
+
 _MANUAL_NOTE = """
 ## これは手動で渡された作業です
-本人が一覧から自分で選んで、対話モードのあなたに渡しています。無人実行ではありません。
-- 判断に迷ったら `review` に回さず、その場で本人に聞いてください（画面の向こうにいます）。
-- 「着手してはいけないもの」の線引きそのものは引き続き守ってください
-  （本人名義の文書の本文は書かない、など）。
+「着手してはいけないもの」の線引きは引き続き守ってください
+（本人名義の文書の本文は書かない、など）。
 """
 
 
@@ -378,26 +392,29 @@ def _build_prompt(
     manual: bool = False,
 ) -> str:
     progress = item.result_log.strip() or "（まだありません。今回が初回です）"
-    candidates = related.find_candidates(
-        client,
-        gemini,
-        config,
-        current_id=item.id,
-        current_title=item.title,
-        current_body=body,
+    catalog_folders = catalog_related.find_candidates(
+        gemini, current_title=item.title, current_body=body
+    )
+    sibling_items = siblings.find_siblings(
+        client, config, current_id=item.id, current_origin=item.origin
     )
     notes = _resumed_note(item)
     if manual:
         notes += _MANUAL_NOTE
+    related_note = siblings.render_section(sibling_items) + catalog_related.render_section(
+        catalog_folders
+    )
     return PROMPT_TEMPLATE.format(
         page_id=item.id,
         title=item.title,
         body=body,
         progress=progress,
         resumed_note=notes,
-        related_note=related.render_section(candidates, allow_review=False),
+        related_note=related_note,
         projects_dir=config.projects_dir,
         cli_path=CROCO_HOME / "croco_cli.py",
+        proceed_note=_PROCEED_INTERACTIVE if config.interactive else _PROCEED_HEADLESS,
+        review_hint=_REVIEW_HINT_INTERACTIVE if config.interactive else "",
     )
 
 

@@ -190,6 +190,22 @@ class Notion:
             payload["children"] = children
         return self._call("POST", "/pages", payload)
 
+    def create_child_page(
+        self, *, parent_page_id: str, title: str, children: list | None = None
+    ) -> dict:
+        """通常ページ（DB行でなく「未処理置き場」のようなページ）の子ページを作る。
+
+        親がデータソースの create_page と違い、親はページIDそのもの。
+        プロパティも任意の列を持てず "title" 1つだけ。
+        """
+        payload: dict[str, Any] = {
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "properties": {"title": {"title": rich_text(title)}},
+        }
+        if children:
+            payload["children"] = children
+        return self._call("POST", "/pages", payload)
+
     def update_page(self, page_id: str, properties: dict) -> dict:
         return self._call("PATCH", f"/pages/{page_id}", {"properties": properties})
 
