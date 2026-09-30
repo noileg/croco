@@ -148,6 +148,8 @@ var textExtensions = map[string]bool{
 	".ps1": true, ".sh": true, ".bash": true, ".bat": true,
 	".java": true, ".c": true, ".h": true, ".hpp": true, ".cpp": true, ".cs": true, ".go": true, ".rs": true, ".rb": true, ".php": true,
 	".sql": true, ".xml": true, ".log": true,
+	".tasks": true, ".kt": true, ".gitignore": true, ".jsonl": true, ".srt": true, ".properties": true,
+	".ahk": true, ".hta": true, ".gradle": true, ".patch": true, ".cmd": true,
 }
 
 type snapshot struct {

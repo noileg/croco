@@ -90,6 +90,8 @@ FILE_WATCH_TEXT_EXTENSIONS = {
     ".ps1", ".sh", ".bash", ".bat",
     ".java", ".c", ".h", ".hpp", ".cpp", ".cs", ".go", ".rs", ".rb", ".php",
     ".sql", ".xml", ".log",
+    ".tasks", ".kt", ".gitignore", ".jsonl", ".srt", ".properties",
+    ".ahk", ".hta", ".gradle", ".patch", ".cmd",
 }
 
 
@@ -120,7 +122,10 @@ def _shadow_track_related(file_path: str, session_id: str | None) -> None:
         if target in state:
             continue
         p = Path(target)
-        if not p.is_file() or p.suffix.lower() not in FILE_WATCH_TEXT_EXTENSIONS:
+        # Path.suffixは".gitignore"のような先頭ドットの名前を拡張子なしと扱うため、
+        # Go版(filepath.Ext)と同じく名前全体を拡張子として見る。
+        ext = p.suffix or (p.name if p.name.startswith(".") else "")
+        if not p.is_file() or ext.lower() not in FILE_WATCH_TEXT_EXTENSIONS:
             continue
         try:
             content = p.read_text(encoding="utf-8", errors="replace")

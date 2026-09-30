@@ -3,7 +3,10 @@
 `hooks/catalog.py`（台帳登録フック）のGo移植。Read/Edit/Write のたびに走る高頻度フックなので、
 `ノート監視フック書き直し`（file_watch系）と同じ理由で移した。設計の経緯・登録する項目・
 通知の意味は `hooks/catalog.py` のdocstringと `記録/検討中_資料管理DB化.md` を参照
-（挙動はPython版と同一。ここには移植に固有のことだけ書く）。
+（ここには移植に固有のことだけ書く）。
+
+Python版（`hooks/catalog.py`）はもう使わない。動いているのはGo版だけで、Python版は保守しない。
+Go版を変えるときにPython版を合わせる必要はない。
 
 ## 構成
 
@@ -13,7 +16,7 @@
 - `notices.go` : 通知文（同名ファイル警告・新規フォルダのlore促し・新規ファイル/Read時のlore・relation促し）と週次クォータ判定
 - `paths.go` : 「クロコ本体」「クロコ管轄プロジェクト」の位置。exeの2つ上を「クロコ本体」とみなす
   （`hooks/`直下に置く前提）。`CATALOG_BASE_DIR`で差し替え可能（テスト用）
-- `tests/compare.py` : Python版とGo版に同じ入力を流し、stdout・DB・file_watchのstate・Read通知の記録を比較
+- `tests/compare.py` : 移植時の検証用（Python版とGo版の出力比較）。移植は済んだので使わない
 
 ## ビルドと配置
 
@@ -25,15 +28,6 @@ go build -ldflags="-s -w" -o ..\catalog_hook.exe .
 
 出力先は `hooks/catalog_hook.exe`（パス決定の前提）。`~/.claude/settings.json` のPostToolUse
 `Edit|Write|NotebookEdit|Read` のcommandがこのexeを指している。
-
-## テスト
-
-```
-PYTHONUTF8=1 python tests\compare.py <スクラッチ作業フォルダ>
-```
-
-本番の`catalog.db`・`~/.claude`には触れない（USERPROFILEとCATALOG_BASE_DIRを差し替える）。
-`ALL OK`が出れば一致。
 
 ## Python版との意図的な違い
 
