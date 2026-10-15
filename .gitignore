@@ -22,3 +22,6 @@ __pycache__/
 # 本人がクロコを介さず直接書き置く場所。中身は個人的な内容になりうるため、
 # パイプライン本体とは別物としてこのリポジトリには含めない。
 ユーザーから直接の陳情置き場/
+
+# Instructions for Claude Code in this specific environment. Kept local, not published.
+/CLAUDE.md
