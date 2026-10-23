@@ -70,6 +70,9 @@
     "allow": [
       "Bash(python *croco_cli.py*)",
       "Bash(python *catalog_cli.py*)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Seita\\claude-pending"
     ]
   },
   "hooks": {
