@@ -25,3 +25,6 @@ __pycache__/
 
 # Instructions for Claude Code in this specific environment. Kept local, not published.
 /CLAUDE.md
+
+# Built hook binaries (the Go source is in クロコ本体/hooks/catalog_go)
+クロコ本体/hooks/*.exe
