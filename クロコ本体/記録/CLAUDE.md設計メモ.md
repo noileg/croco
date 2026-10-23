@@ -28,5 +28,8 @@
 |---|---|---|
 | 全セッション共通 | `~/.claude/CLAUDE.md` | 指示の読み方、応答の形、削る／削らないの線引き、環境、作業の規律 |
 | このプロジェクト | `クロコ関係/CLAUDE.md` | クロコの設計原則、実APIで確認した仕様、どのファイルを読むか |
+| 特定の作業でしか要らないもの | `~/.claude/skills/`（`pc-environment`・`my-tools`） | このPCの環境の癖、本人が作ったツールの使い方 |
+
+理由・経緯は `%USERPROFILE%\claude-rationale\` に、`.claude` に書けないセッションが残す候補は `%USERPROFILE%\claude-pending\` に置く。
 
 プロジェクト固有の話をグローバル側に書かない（他の作業で無駄になる）。
