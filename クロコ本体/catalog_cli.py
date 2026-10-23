@@ -6,8 +6,11 @@ stage/status/lore や relations は判断が要るため、こちらから明示
 使用例:
   python catalog_cli.py values stage                    # 既存のstage値一覧（使い回すため先に見る）
   python catalog_cli.py set "C:\\path\\to\\file.md" stage 作業中
-  python catalog_cli.py relate "A.md" derived_from "B.md"        # weight省略時は既定1
-  python catalog_cli.py relate "A.md" derived_from "B.md" --weight 3  # 本体等、強い関係
+  python catalog_cli.py relate "C:\\…\\A.md" derived_from "C:\\…\\B.md"        # weight省略時は既定1
+  python catalog_cli.py relate "C:\\…\\A.md" derived_from "C:\\…\\B.md" --weight 3  # 本体等、強い関係
+  python catalog_cli.py relate "C:\\…\\A.md" derived_from "C:\\…\\B.md" "C:\\…\\C.md"  # 相手は複数可
+    （relateは実在する絶対パスだけを受け付ける。ファイル以外を指すときは --force）
+  python catalog_cli.py unrelate "C:\\…\\A.md" derived_from "C:\\…\\B.md"      # 3つ組が完全一致する行をすべて消す
   python catalog_cli.py show "C:\\path\\to\\file.md"
   python catalog_cli.py index                            # README.mdのあるフォルダ+loreの索引(新規フォルダ前の関連確認・横断検索の入口)
   python catalog_cli.py move "旧パス" "新パス"          # 実移動＋台帳付け替え＋該当すればgit commit
@@ -19,6 +22,7 @@ stage/status/lore や relations は判断が要るため、こちらから明示
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -52,15 +56,72 @@ def cmd_set(args: argparse.Namespace) -> None:
     print(f"OK: {args.path} の {args.column} を「{args.value}」に設定しました。")
 
 
+_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _relate_reject_reason(node_id: str) -> str | None:
+    """relateで登録させないIDなら、その理由を返す。
+
+    itemsはRead/Write時の絶対パス（区切りは\\）で載るので、それ以外の形で登録した関係は
+    `show`で一致しない。シェルで変数からパスを組み立てたときの崩れ（ドライブ名の抜け、
+    `\\$f`の`\\`がエスケープとして食われて区切りが消え`$f`が残る等）も、実在しないパス
+    としてここで止まる。
+    """
+    if not _ABSOLUTE_PATH.match(node_id):
+        return "ドライブ名から始まる絶対パスではない"
+    if "/" in node_id:
+        return "区切りに / が入っている"
+    if not Path(node_id).exists():
+        return "実在しない"
+    return None
+
+
 def cmd_relate(args: argparse.Namespace) -> None:
-    catalog_db.add_relation(
-        args.from_id,
-        args.relation_type,
-        args.to_id,
-        datetime.now().isoformat(timespec="seconds"),
-        weight=args.weight,
-    )
-    print(f"OK: {args.from_id} --[{args.relation_type} w={args.weight}]--> {args.to_id}")
+    """relationsに足す。相手(to)は複数取れる（1回で複数を繋ぐのにシェルのループを書かせないため）。
+
+    実在しないIDは既定で弾き、1つでも弾かれたら1件も登録しない（途中まで登録されて
+    やり直す、という状況を作らないため）。ファイル以外を指す関係などは--forceで通す。
+    弾いたときのメッセージに--forceは出さない（出すと、崩れたパスに付けて通す使い方を誘うため）。
+    同じ3つ組が既にあれば足さない。
+    """
+    if not args.force:
+        rejected = [
+            (node_id, reason)
+            for node_id in [args.from_id, *args.to_ids]
+            if (reason := _relate_reject_reason(node_id)) is not None
+        ]
+        if rejected:
+            print("エラー: 次のIDは登録できないため、1件も登録していません:", file=sys.stderr)
+            for node_id, reason in rejected:
+                print(f"  {node_id}  （{reason}）", file=sys.stderr)
+            sys.exit(1)
+    created_at = datetime.now().isoformat(timespec="seconds")
+    for to_id in args.to_ids:
+        existing = catalog_db.add_relation(
+            args.from_id, args.relation_type, to_id, created_at, weight=args.weight
+        )
+        if existing is None:
+            print(f"OK: {args.from_id} --[{args.relation_type} w={args.weight}]--> {to_id}")
+        else:
+            print(f"既にあるので足していません: {args.from_id} --[{args.relation_type} w={existing}]--> {to_id}")
+
+
+def cmd_unrelate(args: argparse.Namespace) -> None:
+    """3つ組が完全一致する関係をすべて消す。消した行はrowid・created_at・weightつきで出す
+
+    （消し間違えたとき、それを見てrelateで入れ直せるようにするため）。崩れたパスのまま
+    登録された誤登録を消すのが主な用途なので、IDの正規化も実在確認もしない。
+    """
+    deleted = catalog_db.delete_relations(args.from_id, args.relation_type, args.to_id)
+    if not deleted:
+        print("該当する関係はありません（3つとも完全一致する行だけを消します）。", file=sys.stderr)
+        sys.exit(1)
+    print(f"{len(deleted)}行消しました:")
+    for r in deleted:
+        print(
+            f"  rowid={r['rowid']} {r['from_id']} --[{r['relation_type']} w={r['weight']}]--> "
+            f"{r['to_id']}  ({r['created_at']})"
+        )
 
 
 def cmd_backup(args: argparse.Namespace) -> None:
@@ -249,16 +310,26 @@ def main() -> None:
     p_set.add_argument("value")
     p_set.set_defaults(func=cmd_set)
 
-    p_relate = sub.add_parser("relate", help="relationsに1件追加")
+    p_relate = sub.add_parser("relate", help="relationsに追加（相手は複数可。同じ組が既にあれば足さない）")
     p_relate.add_argument("from_id")
     p_relate.add_argument("relation_type")
-    p_relate.add_argument("to_id")
+    p_relate.add_argument("to_ids", nargs="+", metavar="to_id")
     p_relate.add_argument(
         "--weight", type=float, default=1,
         help="関係の重要度。既定1、本体そのものを指す等の強い関係だけ増やす。"
-             "複数箇所を等分に引用する等の場合は小数も可（例: 1.5）",
+             "複数箇所を等分に引用する等の場合は小数も可（例: 1.5）。相手が複数なら全部に効く",
+    )
+    p_relate.add_argument(
+        "--force", action="store_true",
+        help="実在する絶対パスでないIDも登録する（ファイル以外を指す関係など）",
     )
     p_relate.set_defaults(func=cmd_relate)
+
+    p_unrelate = sub.add_parser("unrelate", help="3つ組が完全一致する関係をすべて消す（消した行を表示）")
+    p_unrelate.add_argument("from_id")
+    p_unrelate.add_argument("relation_type")
+    p_unrelate.add_argument("to_id")
+    p_unrelate.set_defaults(func=cmd_unrelate)
 
     p_show = sub.add_parser("show", help="1件のitemとその関係を表示")
     p_show.add_argument("path")

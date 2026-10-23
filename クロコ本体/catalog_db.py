@@ -10,7 +10,8 @@
   「確定した資料」を区別できる。2026-08-19、本人指摘で分離）。
 - `relations`：時刻つきの4つ組（s, p, o, t）＋weight。from_id/to_id はitemsの
   pathを想定しているが、将来ファイル以外（決定事項・概念等）も指せるよう、
-  外部キー制約はかけていない。relation_typeは自由記述（閉じた語彙にしない）。
+  外部キー制約はかけていない（ただしCLIの`relate`は、実在しないIDを既定で弾く。
+  ファイル以外を指すときは`--force`で通す）。relation_typeは自由記述（閉じた語彙にしない）。
   weightは関係の重要度（確信度でも頻度でもない）。既定1、本人・AIが強いと
   判断したときだけ増やす手動運用（2026-08-20、本人指摘：「基本は1、強いと
   思ったら増やす」。索引に載っているだけの関係より、本体そのものを指す関係を
@@ -187,18 +188,51 @@ def distinct_relation_types() -> list[str]:
 
 def add_relation(
     from_id: str, relation_type: str, to_id: str, created_at: str, weight: float = 1
-) -> None:
+) -> float | None:
     """点時刻つきの4つ組＋weightを1件追加する。対等な関係でも逆向きは自動で足さない
 
     （検索側で from/to 両方向を見る運用にしているため。逆向きも登録すると
     同じ関係が2行に分裂してメンテが増える）。weightは既定1、強いと判断した
     ときだけ呼び出し側で増やす。
+
+    同じ3つ組（from_id, relation_type, to_id）が既にあれば足さず、既存のweightを
+    返す（足したときはNone）。relationsに一意制約は無いので、同じ登録のやり直しで
+    行が重なるのをここで止める。weightだけ違う場合も足さない（変えたいときは
+    delete_relationsで消してから足し直す）。
     """
     with connect() as conn:
+        existing = conn.execute(
+            "SELECT weight FROM relations WHERE from_id = ? AND relation_type = ? AND to_id = ? LIMIT 1",
+            (from_id, relation_type, to_id),
+        ).fetchone()
+        if existing is not None:
+            return existing[0]
         conn.execute(
             "INSERT INTO relations (from_id, relation_type, to_id, created_at, weight) VALUES (?, ?, ?, ?, ?)",
             (from_id, relation_type, to_id, created_at, weight),
         )
+    return None
+
+
+def delete_relations(from_id: str, relation_type: str, to_id: str) -> list[sqlite3.Row]:
+    """3つ組が完全一致する行をすべて消し、消した行（rowid・created_at・weightつき）を返す。
+
+    relationsには一意制約が無く同じ組が複数行ありうるため、1回で全部消す。
+    消した行を返すのは、消し間違えたときに呼び出し側が表示して手で入れ直せるようにするため。
+    IDは正規化しない（ドライブ名の抜け・シェル変数の残りなど、崩れたまま登録された行にも
+    一致させるため）。
+    """
+    with connect() as conn:
+        conn.row_factory = sqlite3.Row
+        params = (from_id, relation_type, to_id)
+        rows = conn.execute(
+            "SELECT rowid, * FROM relations WHERE from_id = ? AND relation_type = ? AND to_id = ? ORDER BY rowid",
+            params,
+        ).fetchall()
+        conn.execute(
+            "DELETE FROM relations WHERE from_id = ? AND relation_type = ? AND to_id = ?", params
+        )
+    return rows
 
 
 def get_item(path: str) -> sqlite3.Row | None:

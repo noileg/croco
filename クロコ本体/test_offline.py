@@ -1129,6 +1129,137 @@ check(
     True,
 )
 
+# --- 関係の登録・削除（catalog_db.add_relation / delete_relations、catalog_cli relate / unrelate） ---
+import argparse  # noqa: E402
+
+
+def _run_cli(func, **kwargs):
+    """catalog_cliのサブコマンドを呼び、(終了コード, 標準出力, 標準エラー)を返す。"""
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            func(argparse.Namespace(**kwargs))
+        except SystemExit as exc:
+            code = exc.code
+    return code, out.getvalue(), err.getvalue()
+
+
+def _relation_rows():
+    conn = _catalog_db.connect()
+    rows = conn.execute(
+        "SELECT from_id, relation_type, to_id, weight FROM relations ORDER BY rowid"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    _rel_root = Path(tmp).resolve()
+    _saved_db_path = _catalog_db.DB_PATH
+    _catalog_db.DB_PATH = _rel_root / "catalog.db"
+    try:
+        _ra, _rb, _rc = (str(_rel_root / n) for n in ("A.md", "B.md", "C.md"))
+        for _p in (_ra, _rb, _rc):
+            Path(_p).write_text("x", encoding="utf-8")
+        _broken = str(_rel_root) + "$f.md"  # `\$f` の `\` が食われて区切りが消えた形
+        _no_drive = "\\下書き\\B.md"
+        _missing = str(_rel_root / "無い.md")
+
+        # 削除：3つ組が完全一致する行だけを全部消し、消した行を返す
+        _rel_conn = _catalog_db.connect()
+        with _rel_conn:
+            for _row in [
+                (_ra, "derived_from", _broken, "2026-01-01T00:00:01", 1),
+                (_ra, "derived_from", _broken, "2026-01-01T00:00:02", 1),
+                (_ra, "derived_from", _broken, "2026-01-01T00:00:03", 1),
+                (_ra, "references", _broken, "2026-01-01T00:00:04", 1),
+                (_ra, "derived_from", _rb, "2026-01-01T00:00:05", 2),
+            ]:
+                _rel_conn.execute(
+                    "INSERT INTO relations (from_id, relation_type, to_id, created_at, weight) VALUES (?, ?, ?, ?, ?)",
+                    _row,
+                )
+        _rel_conn.close()
+        _deleted = _catalog_db.delete_relations(_ra, "derived_from", _broken)
+        check("delete_relations: 重なった行を1回で全部消す", len(_deleted), 3)
+        check(
+            "delete_relations: 消した行をrowid・created_at・weightつきで返す",
+            [(r["rowid"], r["created_at"], r["weight"]) for r in _deleted],
+            [(1, "2026-01-01T00:00:01", 1), (2, "2026-01-01T00:00:02", 1), (3, "2026-01-01T00:00:03", 1)],
+        )
+        check(
+            "delete_relations: 種別・相手が違う行は残す",
+            _relation_rows(),
+            [(_ra, "references", _broken, 1), (_ra, "derived_from", _rb, 2)],
+        )
+        check("delete_relations: 一致しなければ何も消さない", _catalog_db.delete_relations(_ra, "derived_from", _broken), [])
+
+        _code, _out, _err = _run_cli(
+            _catalog_cli.cmd_unrelate, from_id=_ra, relation_type="references", to_id=_broken
+        )
+        check("unrelate: 崩れたパスのままでも一致させて消す", (_code, _relation_rows()), (0, [(_ra, "derived_from", _rb, 2)]))
+        check("unrelate: 消した行のrowidとcreated_atを表示する", "rowid=4" in _out and "2026-01-01T00:00:04" in _out, True)
+        _code, _out, _err = _run_cli(
+            _catalog_cli.cmd_unrelate, from_id=_ra, relation_type="references", to_id=_broken
+        )
+        check("unrelate: 該当なしは終了コード1", _code, 1)
+
+        # 登録：同じ3つ組は足さない（weightが違っても）
+        check("add_relation: 既にある組は足さず既存のweightを返す", _catalog_db.add_relation(_ra, "derived_from", _rb, "t", 5), 2)
+        check("add_relation: 既にある組で行が増えない", len(_relation_rows()), 1)
+        check("add_relation: 新しい組は足してNoneを返す", _catalog_db.add_relation(_rb, "follows", _ra, "t"), None)
+
+        # relate：実在しない・形の崩れたIDは既定で弾き、1件も登録しない
+        _before = _relation_rows()
+        for _label, _bad, _reason in [
+            ("シェル変数の残り", _broken, "実在しない"),
+            ("ドライブ名の抜け", _no_drive, "絶対パスではない"),
+            ("相対パス", "B.md", "絶対パスではない"),
+            ("区切りが /", _rb.replace("\\", "/"), "区切りに / が入っている"),
+            ("実在しない", _missing, "実在しない"),
+        ]:
+            _code, _out, _err = _run_cli(
+                _catalog_cli.cmd_relate,
+                from_id=_ra, relation_type="derived_from", to_ids=[_rc, _bad], weight=1, force=False,
+            )
+            check(f"relate: {_label}のIDは弾き、ほかの相手も登録しない", (_code, _relation_rows()), (1, _before))
+            check(f"relate: {_label}のIDを理由つきで出す", f"{_bad}  （" in _err and _reason in _err, True)
+        _code, _out, _err = _run_cli(
+            _catalog_cli.cmd_relate,
+            from_id=_broken, relation_type="derived_from", to_ids=[_rc], weight=1, force=False,
+        )
+        check("relate: fromの側も弾く", (_code, _relation_rows()), (1, _before))
+        check("relate: 弾いたときのメッセージに--forceを出さない", "--force" in _err, False)
+
+        # relate：相手を複数取り、既にある組は足さずに知らせる
+        _code, _out, _err = _run_cli(
+            _catalog_cli.cmd_relate,
+            from_id=_rc, relation_type="derived_from", to_ids=[_ra, _rb], weight=1, force=False,
+        )
+        check(
+            "relate: 相手を複数取って全部登録する",
+            (_code, _relation_rows()[len(_before):]),
+            (0, [(_rc, "derived_from", _ra, 1), (_rc, "derived_from", _rb, 1)]),
+        )
+        _count = len(_relation_rows())
+        _code, _out, _err = _run_cli(
+            _catalog_cli.cmd_relate,
+            from_id=_rc, relation_type="derived_from", to_ids=[_ra], weight=3, force=False,
+        )
+        check("relate: 既にある組は足さない", (_code, len(_relation_rows())), (0, _count))
+        check("relate: 既にある旨と既存のweightを表示する", "既にある" in _out and "w=1" in _out, True)
+
+        # relate --force：実在しないIDも登録する
+        _code, _out, _err = _run_cli(
+            _catalog_cli.cmd_relate,
+            from_id=_ra, relation_type="decides", to_ids=["決定事項X"], weight=1, force=True,
+        )
+        check("relate --force: 実在しないIDも登録する", (_code, _relation_rows()[-1]), (0, (_ra, "decides", "決定事項X", 1)))
+    finally:
+        _catalog_db.DB_PATH = _saved_db_path
+        gc.collect()
+
 # --- 由来メモの兄弟アイテム提示（croco/siblings.py） --------------------------------
 from croco import siblings as _siblings  # noqa: E402
 
